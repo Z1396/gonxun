@@ -10,8 +10,8 @@ class KalmanFilter:
     """
     二维卡尔曼滤波器
     状态量：[x, y] 目标中心点横纵坐标
-    预测+更新两步融合，输出平滑后的坐标
     """
+
     def __init__(self, q=1e-5, r=1e-2):
         """
         :param q: 过程噪声协方差 (越小越信任模型预测)
@@ -19,33 +19,27 @@ class KalmanFilter:
         """
         self.q = q
         self.r = r
-        self.x = np.array([[0], [0]], dtype=np.float32)  # 状态向量
-        self.p = np.eye(2)     # 误差协方差矩阵
-        self.k = np.zeros((2, 2))  # 卡尔曼增益
-        self.initialized = False  # 是否已初始化
+        self.x = np.array([[0], [0]], dtype=np.float32)
+        self.p = np.eye(2)
+        self.initialized = False
 
     def predict(self):
-        """预测步骤：根据上一帧状态预估当前位置"""
+        """预测步骤"""
         self.p = self.p + self.q
 
     def update(self, z):
-        """
-        更新步骤：传入观测值z，融合预测值得到平滑坐标
-        :param z: 观测值矩阵 [[x], [y]]
-        :return: 滤波后的坐标
-        """
-        self.k = self.p @ np.linalg.inv(self.p + self.r)
-        self.x = self.x + self.k @ (z - self.x)
-        self.p = (np.eye(2) - self.k) @ self.p
+        """更新步骤：融合预测值与观测值"""
+        # 2x2对角矩阵求逆优化：闭式解替代 np.linalg.inv
+        p_diag = np.diag(self.p)
+        pr = p_diag + self.r
+        k_diag = pr / (pr + self.r)
+        innovation = z - self.x
+        self.x = self.x + k_diag.reshape(2, 1) * innovation
+        self.p = np.diag((1 - k_diag) * p_diag)
         return self.x
 
     def filter(self, z):
-        """
-        一步完成预测+更新 (便捷接口)
-        :param z: 观测值矩阵 [[x], [y]] 或 (x, y) 元组
-        :return: 滤波后的坐标
-        """
-        # 兼容 (x, y) 元组输入
+        """一步完成预测+更新，支持 [[x],[y]] 矩阵或 (x,y) 元组"""
         if isinstance(z, (tuple, list)):
             z = np.array([[z[0]], [z[1]]], dtype=np.float32)
         self.predict()

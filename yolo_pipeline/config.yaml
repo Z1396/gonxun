@@ -1,0 +1,72 @@
+ # YOLO 物块识别流程配置文件
+# 修改此文件即可快速启动整个识别流程
+
+# ==================== 项目配置 ====================
+project:
+  name: "material_detection"           # 项目名称
+  base_dir: "./yolo_dataset"           # 数据集根目录
+  output_dir: "./runs"                 # 训练输出目录
+
+# ==================== 类别定义 ====================
+# 修改为你的物块类别名称和数量
+classes:
+  count: 6                             # 类别总数
+  names:                               # 类别名称列表（顺序对应ID 0,1,2...）
+    - "red_block"
+    - "blue_block"
+    - "green_block"
+    - "yellow_block"
+    - "black_block"
+    - "light_blue_block"
+
+# ==================== 数据配置 ====================
+data:
+  raw_dir: "./raw_images"              # 原始图片存放目录
+  train_ratio: 0.8                     # 训练集比例
+  val_ratio: 0.2                       # 验证集比例
+  img_size: [640, 640]                 # 图像尺寸 (宽, 高)
+  augment: true                        # 是否数据增强
+
+# 数据增强参数
+augmentation:
+  rotation: 15                         # 最大旋转角度
+  flip_lr: true                        # 左右翻转
+  flip_ud: false                       # 上下翻转
+  brightness: 0.2                      # 亮度变化范围
+  contrast: 0.2                        # 对比度变化范围
+  noise: 0.05                          # 噪声强度
+
+# ==================== 训练配置 ====================
+training:
+  model: "yolov8n.pt"                  # 预训练模型 (n/s/m/l/x)
+  epochs: 100                          # 训练轮数
+  batch_size: 16                       # 批次大小（根据显存调整）
+  imgsz: 640                           # 推理图像尺寸
+  device: 0                            # GPU设备 (0=cuda:0, 'cpu')
+  workers: 8                           # 数据加载线程数
+
+  # 学习率
+  lr0: 0.01                            # 初始学习率
+  lrf: 0.01                            # 最终学习率系数
+
+  # 早停
+  patience: 50                         # 验证集无改善时早停
+
+  # 保存
+  save_period: 10                      # 每N轮保存一次
+
+# ==================== 评估配置 ====================
+evaluation:
+  conf_threshold: 0.5                  # 置信度阈值
+  iou_threshold: 0.45                  # NMS IoU阈值
+  target_map50: 0.90                   # 目标mAP50
+  target_map: 0.75                     # 目标mAP50-95
+
+# ==================== 推理配置 ====================
+inference:
+  model_path: ""                       # 留空则使用最新训练模型
+  source: "0"                          # 输入源: 摄像头索引 / 图片路径 / 视频路径
+  conf_threshold: 0.5                  # 置信度阈值
+  save: true                           # 是否保存结果
+  show: true                           # 是否显示窗口
+  device: 0                            # 推理设备

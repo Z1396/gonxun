@@ -35,17 +35,39 @@ from .serial_comm import (
 from .camera_manager import CameraManager
 from .task_display import TaskDisplay
 from .obstacle_detector import ObstacleDetector
+from .system import VisionSystem
+from .utils import FPSCounter, check_gui_available, generate_test_frame
+
+# YOLOv8 + 传统CV 融合检测模块（依赖ultralytics，未安装时导入不报错）
+from .yolo_detector import YOLO_AVAILABLE
+from .region_extractor import RegionExtractor
+from .precise_locator import PreciseLocator, PreciseResult
+from .fusion_detector import FusionDetector, FusionResult, FusionDetectorWithTiming
+from .visualization import Visualizer
+
+# 物料识别系统（YOLOv8 + 颜色检测融合）
+from .material_recognizer import MaterialRecognizer, MaterialResult
+from .material_visualizer import MaterialVisualizer
 
 __all__ = [
     # 类
     'ColorDetector', 'ThreeRingDetector', 'SixRingDetector',
     'QRDetector', 'TaskCodeParser', 'KalmanFilter',
     'SerialComm', 'CameraManager', 'TaskDisplay', 'ObstacleDetector',
+    'VisionSystem', 'FPSCounter',
+    # 融合检测
+    'RegionExtractor', 'PreciseLocator', 'PreciseResult',
+    'FusionDetector', 'FusionResult', 'FusionDetectorWithTiming',
+    'Visualizer',
+    # 物料识别
+    'MaterialRecognizer', 'MaterialResult', 'MaterialVisualizer',
     # 常量
     'COLOR_DIST', 'COLOR_ID_MAP', 'RING_SCORES',
     'MODE_IDLE', 'MODE_COLOR', 'MODE_RING', 'MODE_DOCK', 'MODE_QR',
     'CMD_COLOR', 'CMD_RING', 'CMD_DOCK', 'CMD_QR',
     'FRAME_HEADER', 'FRAME_TAIL',
+    'YOLO_AVAILABLE',
     # 函数
-    'get_color_by_id', 'calc_placement_score'
+    'get_color_by_id', 'calc_placement_score',
+    'check_gui_available', 'generate_test_frame'
 ]

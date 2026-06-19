@@ -34,6 +34,10 @@ from PIL import Image, ImageDraw, ImageFont
 app = Flask(__name__)
 
 
+# 字体缓存字典：按 font_size 缓存已加载的 PIL 字体对象，避免每帧重复加载
+_FONT_CACHE = {}
+
+
 def put_chinese_text(img, text, pos, font_size=16, color=(255, 255, 255)):
     """
     OpenCV画布中文绘制兼容工具函数
@@ -45,16 +49,18 @@ def put_chinese_text(img, text, pos, font_size=16, color=(255, 255, 255)):
     :param color: 文字RGB颜色元组，默认白色(255,255,255)
     :return: 绘制完成后的OpenCV BGR图像
     """
-    # 层级兜底加载微软雅黑中文字体，优先系统默认字体名
-    try:
-        font = ImageFont.truetype("msyh.ttc", font_size)
-    except:
-        # 第一层失败，尝试Windows系统字体绝对路径
+    # 从缓存获取字体，首次加载时按 size 缓存
+    font = _FONT_CACHE.get(font_size)
+    if font is None:
         try:
             font = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", font_size)
-        except:
-            # 无可用中文字体时加载系统默认极简字体（中文方块）
-            font = ImageFont.load_default()
+        except Exception:
+            try:
+                font = ImageFont.truetype("msyh.ttc", font_size)
+            except Exception:
+                font = ImageFont.load_default()
+        _FONT_CACHE[font_size] = font
+
     # OpenCV图像通道为BGR，PIL绘图必须转换为RGB通道
     pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
     # 创建PIL画笔对象，用于画布文字绘制
@@ -134,23 +140,22 @@ def generate_task_code():
     第四段：第二批物料对应暂存区放置圆环编号
     :return: 任务码字符串, 第一批物料列表, 粗加工环号列表, 第二批物料列表, 暂存环号列表
     """
-    # 生成1~6全部物料编号列表
+    # 随机打乱1~6全部物料编号，前3个为第一批，后3个为第二批
     colors = list(range(1, 7))
-    # 随机打乱物料顺序
     random.shuffle(colors)
-    # 切片拆分两批物料
-    batch1_colors = colors[:3]  # 前3个=第一批抓取物料
-    batch2_colors = colors[3:6] # 后3个=第二批抓取物料
+    batch1_colors, batch2_colors = colors[:3], colors[3:]
 
-    # 随机生成3个1~6圆环编号
+    # 随机生成两批1~6圆环编号
     pos1 = [random.randint(1, 6) for _ in range(3)]
     pos2 = [random.randint(1, 6) for _ in range(3)]
 
-    # f-string拼接标准任务字符串
-    code = f"{batch1_colors[0]}{batch1_colors[1]}{batch1_colors[2]}+" \
-           f"{pos1[0]}{pos1[1]}{pos1[2]}+" \
-           f"{batch2_colors[0]}{batch2_colors[1]}{batch2_colors[2]}+" \
-           f"{pos2[0]}{pos2[1]}{pos2[2]}"
+    # 拼接标准四段式任务码
+    code = "+".join([
+        "".join(map(str, batch1_colors)),
+        "".join(map(str, pos1)),
+        "".join(map(str, batch2_colors)),
+        "".join(map(str, pos2))
+    ])
     return code, batch1_colors, pos1, batch2_colors, pos2
 
 
@@ -209,6 +214,7 @@ class CompetitionSimulator:
         self.anim_frame = 0 # 全局动画总帧计数器
 
         self.mission_queue = [] # 完整有序任务队列，全自动执行核心容器
+        self._field_bg_cache = None  # 场地静态背景缓存，每局重新生成
 
         self._new_game() # 初始化全新一局比赛
 
@@ -342,14 +348,15 @@ class CompetitionSimulator:
         self._add_log("=== 比赛开始 ===")
         self._add_log(f"任务码: {self.task_code}")
         self._action_executed = False  # 标记当前步骤动作是否已执行
-        self._set_next_step() # 加载第一个任务的行驶路径点
+        self._field_bg_cache = None    # 新对局清除场地背景缓存
+        self._set_next_step() # 加载第一个任务的行驶路径
 
     def _set_next_step(self):
         """私有方法：切换下一个任务步骤，生成起点到目标的插值行驶路径"""
         if self.mission_step < len(self.mission_queue):
             step = self.mission_queue[self.mission_step]
-            # 根据小车当前坐标、任务目标坐标生成匀速行驶路径点
-            self.path_points = self._compute_path(self.car_pos, step['target'])
+            # 根据小车当前坐标、任务目标坐标生成车道级行驶路径点
+            self.path_points = self._compute_path_via_lanes(self.car_pos, step['target'])
             self.path_index = 0
             self.current_action = step['desc']
             self._action_executed = False  # 新步骤，动作未执行
@@ -366,18 +373,58 @@ class CompetitionSimulator:
         :param end: 终点np浮点数组 [x,y] 单位mm
         :return: 路径点列表，每个元素为一帧小车坐标
         """
+        delta = end - start
+        dist = np.linalg.norm(delta)
+        steps = max(int(dist / self.car_speed), 1)  # 最少1帧防止除零
+        # 向量化线性插值生成每一步坐标，避免Python循环
+        ts = np.linspace(0, 1, steps, endpoint=False).reshape(-1, 1)
+        points = [start + delta * t for t in ts]
+        points.append(end.copy())  # 强制追加终点，避免浮点精度误差
+        return points
+
+    def _compute_path_via_lanes(self, start, end):
+        """
+        车道级路径规划：机器人离开启停区后沿灰色十字车道行驶。
+        策略：先接入最近车道，沿水平/垂直车道行驶，再驶出到达目标。
+        """
+        # 如果起止点都在启停区或原料区内（非车道区域），允许短距离直线驶出/驶入
+        in_lane_start = (LANE_START <= start[0] <= LANE_END) or (LANE_START <= start[1] <= LANE_END)
+        in_lane_end = (LANE_START <= end[0] <= LANE_END) or (LANE_START <= end[1] <= LANE_END)
+
+        # 如果起止点可通过单条车道直接连接，直接走直线
+        if in_lane_start and in_lane_end:
+            # 同水平车道
+            if LANE_START <= start[1] <= LANE_END and LANE_START <= end[1] <= LANE_END:
+                return self._compute_path(start, end)
+            # 同垂直车道
+            if LANE_START <= start[0] <= LANE_END and LANE_START <= end[0] <= LANE_END:
+                return self._compute_path(start, end)
+
+        # 方案A：起点 → 水平车道(y=1200) → 垂直车道(x=1200) → 终点
+        p1_a = np.array([start[0], LANE_CENTER])
+        p2_a = np.array([LANE_CENTER, end[1]])
+        # 方案B：起点 → 垂直车道(x=1200) → 水平车道(y=1200) → 终点
+        p1_b = np.array([LANE_CENTER, start[1]])
+        p2_b = np.array([end[0], LANE_CENTER])
+
+        def seg_len(a, b):
+            return np.linalg.norm(a - b)
+
+        d_a = seg_len(start, p1_a) + seg_len(p1_a, p2_a) + seg_len(p2_a, end)
+        d_b = seg_len(start, p1_b) + seg_len(p1_b, p2_b) + seg_len(p2_b, end)
+
+        via = [p1_a, p2_a] if d_a <= d_b else [p1_b, p2_b]
+
+        # 拼接各段路径，移除重复点
         points = []
-        dx = end[0] - start[0]
-        dy = end[1] - start[1]
-        dist = np.linalg.norm([dx, dy]) # 计算两点欧几里得直线距离
-        steps = max(int(dist / self.car_speed), 1) # 总移动帧数，最少1帧防止除零
-        # 线性插值生成每一步坐标
-        for i in range(steps):
-            t = i / steps # 0~1插值比例系数
-            x = start[0] + dx * t
-            y = start[1] + dy * t
-            points.append(np.array([x, y]))
-        points.append(end.copy()) # 强制追加终点，避免浮点精度误差无法抵达目标
+        current = np.array([start[0], start[1]])
+        for p in via:
+            if seg_len(current, p) > 1.0:
+                segment = self._compute_path(current, p)
+                points.extend(segment[:-1])
+                current = segment[-1]
+        segment = self._compute_path(current, end)
+        points.extend(segment)
         return points
 
     def _add_log(self, msg):
@@ -496,30 +543,44 @@ class CompetitionSimulator:
         y_px = int((FIELD_SIZE - pos_mm[1]) * PIXEL_PER_MM)
         return (x_px, y_px)
 
-    def render_field(self):
-        """绘制全局2400mm场地俯视图，返回完整场地画布"""
-        # 计算画布总像素尺寸
+    def _draw_zone(self, img, zone, color, label):
+        """绘制矩形功能区边框与文字标签"""
+        x, y, w, h = zone
+        sx, sy = self._mm_to_px((x, y))
+        ex, ey = self._mm_to_px((x + w, y + h))
+        cv2.rectangle(img, (ex, sy), (sx, ey), color, 2)
+        cv2.putText(img, label, (ex + 5, sy + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+    def _draw_zone_with_rings(self, img, zone, color, label):
+        """绘制矩形功能区，并在内部水平排列6个编号圆环"""
+        self._draw_zone(img, zone, color, label)
+        x, y, w, h = zone
+        _, sy = self._mm_to_px((x, y))
+        ex, ey = self._mm_to_px((x + w, y + h))
+        ry = (sy + ey) // 2
+        for i in range(1, 7):
+            rx = ex + 20 + i * 80
+            cv2.circle(img, (rx, ry), 10, (200, 200, 200), 1)
+            cv2.putText(img, str(i), (rx - 3, ry + 3), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (100, 100, 100), 1)
+
+    def _render_field_static(self):
+        """绘制静态场地背景（车道、功能区域、障碍物等），结果会被 render_field 缓存复用"""
         size = int(FIELD_SIZE * PIXEL_PER_MM)
-        # 创建白色背景画布
         img = np.ones((size, size, 3), dtype=np.uint8) * 245
 
-        # 1. 绘制四角淡黄色安全区域
+        # 1. 四角淡黄色安全区域
         for zone in YELLOW_ZONES:
             x, y, w, h = zone
             sx, sy = self._mm_to_px((x, y))
             ex, ey = self._mm_to_px((x + w, y + h))
-            cv2.rectangle(img, (ex, sy), (sx, ey), (230, 230, 160), -1) # 填充底色
-            cv2.rectangle(img, (ex, sy), (sx, ey), (200, 200, 120), 1) # 边框线
+            cv2.rectangle(img, (ex, sy), (sx, ey), (230, 230, 160), -1)
+            cv2.rectangle(img, (ex, sy), (sx, ey), (200, 200, 120), 1)
 
-        # 2. 绘制灰色十字车道
+        # 2. 灰色十字车道
         lane_s = int(LANE_START * PIXEL_PER_MM)
         lane_e = int(LANE_END * PIXEL_PER_MM)
-        # 垂直纵向车道填充
         cv2.rectangle(img, (lane_s, 0), (lane_e, size), (170, 170, 170), -1)
-        # 水平横向车道填充
         cv2.rectangle(img, (0, lane_s), (size, lane_e), (170, 170, 170), -1)
-
-        # 车道四条边界分隔细线
         cv2.line(img, (lane_s, 0), (lane_s, size), (120, 120, 120), 1)
         cv2.line(img, (lane_e, 0), (lane_e, size), (120, 120, 120), 1)
         cv2.line(img, (0, lane_s), (size, lane_s), (120, 120, 120), 1)
@@ -536,60 +597,19 @@ class CompetitionSimulator:
             cv2.rectangle(img, (ex, sy), (sx, ey), (100, 100, 255), 2)
             cv2.putText(img, "START", (ex + 5, sy + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 255), 1)
 
-        # 5. 原料圆形转盘
+        # 5. 原料圆形转盘（不含物料，物料为动态元素）
         cx_mm, cy_mm = RAW_ZONE_CENTER
         cx_px, cy_px = self._mm_to_px((cx_mm, cy_mm))
         r_px = int(RAW_ZONE_RADIUS * PIXEL_PER_MM)
-        cv2.circle(img, (cx_px, cy_px), r_px, (220, 220, 220), -1) # 填充底色
-        cv2.circle(img, (cx_px, cy_px), r_px, (80, 80, 80), 2)     # 外圈边框
+        cv2.circle(img, (cx_px, cy_px), r_px, (220, 220, 220), -1)
+        cv2.circle(img, (cx_px, cy_px), r_px, (80, 80, 80), 2)
         cv2.putText(img, "RAW", (cx_px - 15, cy_px - r_px - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
 
-        # 绘制转盘上所有未被抓取的物料圆点
-        for mat in self.materials_on_platform:
-            if mat['picked']:
-                continue # 已抓取跳过不绘制
-            mx, my = mat['pos']
-            mx_px, my_px = self._mm_to_px((mx, my))
-            cv2.circle(img, (mx_px, my_px), int(18 * PIXEL_PER_MM), mat['color'], -1)
-            cv2.circle(img, (mx_px, my_px), int(18 * PIXEL_PER_MM), (0, 0, 0), 1)
-
-        # 6. 粗加工放置区与6个编号圆环
-        x, y, w, h = ROUGH_ZONE
-        sx, sy = self._mm_to_px((x, y))
-        ex, ey = self._mm_to_px((x + w, y + h))
-        cv2.rectangle(img, (ex, sy), (sx, ey), (180, 140, 0), 2)
-        cv2.putText(img, "ROUGH", (ex + 5, sy + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 140, 0), 1)
-        for i in range(1, 7):
-            rx = ex + 20 + i * 80
-            ry = (sy + ey) // 2
-            cv2.circle(img, (rx, ry), 10, (200, 200, 200), 1)
-            cv2.putText(img, str(i), (rx - 3, ry + 3), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (100, 100, 100), 1)
-
-        # 7. 物料暂存区与6个编号圆环
-        x, y, w, h = TEMP_ZONE
-        sx, sy = self._mm_to_px((x, y))
-        ex, ey = self._mm_to_px((x + w, y + h))
-        cv2.rectangle(img, (ex, sy), (sx, ey), (0, 140, 180), 2)
-        cv2.putText(img, "TEMP", (ex + 5, sy + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 140, 180), 1)
-        for i in range(1, 7):
-            rx = ex + 20 + i * 80
-            ry = (sy + ey) // 2
-            cv2.circle(img, (rx, ry), 10, (200, 200, 200), 1)
-            cv2.putText(img, str(i), (rx - 3, ry + 3), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (100, 100, 100), 1)
-
-        # 8. 精加工预留区域
-        x, y, w, h = FINE_ZONE
-        sx, sy = self._mm_to_px((x, y))
-        ex, ey = self._mm_to_px((x + w, y + h))
-        cv2.rectangle(img, (ex, sy), (sx, ey), (140, 0, 180), 2)
-        cv2.putText(img, "FINE", (ex + 5, sy + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (140, 0, 180), 1)
-
-        # 9. 成品存放预留区域
-        x, y, w, h = FINISH_ZONE
-        sx, sy = self._mm_to_px((x, y))
-        ex, ey = self._mm_to_px((x + w, y + h))
-        cv2.rectangle(img, (ex, sy), (sx, ey), (0, 180, 0), 2)
-        cv2.putText(img, "FINISH", (ex + 5, sy + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 180, 0), 1)
+        # 6~9. 加工/存放功能区（复用统一绘制方法）
+        self._draw_zone_with_rings(img, ROUGH_ZONE, (180, 140, 0), "ROUGH")
+        self._draw_zone_with_rings(img, TEMP_ZONE, (0, 140, 180), "TEMP")
+        self._draw_zone(img, FINE_ZONE, (140, 0, 180), "FINE")
+        self._draw_zone(img, FINISH_ZONE, (0, 180, 0), "FINISH")
 
         # 10. 紫色二维码识别板
         qx, qy = QR_BOARD_POS
@@ -597,17 +617,35 @@ class CompetitionSimulator:
         cv2.rectangle(img, (qx_px - 20, qy_px - 30), (qx_px + 20, qy_px + 30), (128, 0, 128), 2)
         cv2.putText(img, "QR", (qx_px - 8, qy_px + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (128, 0, 128), 1)
 
-        # 11. 车道黑色障碍物圆点
+        # 11. 车道黑色障碍物圆点（每局随机生成，但对局内固定，放入静态缓存）
         for ox, oy in self.obstacles:
             ox_px, oy_px = self._mm_to_px((ox, oy))
             r = int(25 * PIXEL_PER_MM)
             cv2.circle(img, (ox_px, oy_px), r, (20, 20, 20), -1)
             cv2.circle(img, (ox_px, oy_px), r, (0, 0, 0), 1)
 
-        # 12. 小车当前规划行驶路径浅蓝色线条
+        return img
+
+    def render_field(self):
+        """绘制全局2400mm场地俯视图：复用静态背景缓存，仅叠加每帧动态元素"""
+        # 首次或新对局后重新生成静态背景
+        if self._field_bg_cache is None:
+            self._field_bg_cache = self._render_field_static()
+        # 复制背景，避免破坏缓存
+        img = self._field_bg_cache.copy()
+
+        # 动态元素1：转盘上未被抓取的物料圆点
+        for mat in self.materials_on_platform:
+            if mat['picked']:
+                continue
+            mx, my = mat['pos']
+            mx_px, my_px = self._mm_to_px((mx, my))
+            cv2.circle(img, (mx_px, my_px), int(18 * PIXEL_PER_MM), mat['color'], -1)
+            cv2.circle(img, (mx_px, my_px), int(18 * PIXEL_PER_MM), (0, 0, 0), 1)
+
+        # 动态元素2：小车当前规划行驶路径浅蓝色线条
         if len(self.path_points) > 0 and self.path_index < len(self.path_points):
             pts = []
-            # 最多渲染后续80个路径点，避免线条过长卡顿
             for i in range(self.path_index, min(len(self.path_points), self.path_index + 80)):
                 p = self.path_points[i]
                 px, py = self._mm_to_px(p)
@@ -616,19 +654,18 @@ class CompetitionSimulator:
                 pts = np.array(pts, np.int32)
                 cv2.polylines(img, [pts], False, (0, 150, 255), 2, cv2.LINE_AA)
 
-        # 13. 绘制三角形小车本体
+        # 动态元素3：三角形小车本体（预计算 cos/sin，避免重复三角函数调用）
         car_px, car_py = self._mm_to_px(self.car_pos)
         car_size = int(35 * PIXEL_PER_MM)
         angle_rad = math.radians(self.car_angle)
-
-        # 三角形三个顶点坐标计算
+        cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
         body_pts = np.array([
-            [car_px + car_size * math.cos(angle_rad), car_py - car_size * math.sin(angle_rad)],
+            [car_px + car_size * cos_a, car_py - car_size * sin_a],
             [car_px + car_size * 0.5 * math.cos(angle_rad + 2.6), car_py - car_size * 0.5 * math.sin(angle_rad + 2.6)],
             [car_px + car_size * 0.5 * math.cos(angle_rad - 2.6), car_py - car_size * 0.5 * math.sin(angle_rad - 2.6)],
         ], np.int32)
-        cv2.fillPoly(img, [body_pts], (0, 0, 220)) # 填充深蓝车身
-        cv2.polylines(img, [body_pts], True, (0, 0, 0), 1) # 黑色轮廓
+        cv2.fillPoly(img, [body_pts], (0, 0, 220))
+        cv2.polylines(img, [body_pts], True, (0, 0, 0), 1)
 
         # 小车上方绿色任务码显示屏
         disp_y = car_py - car_size - 6
@@ -680,7 +717,7 @@ class CompetitionSimulator:
                     cv2.putText(img, "TAKEN", (positions[i][0] - 20, positions[i][1] + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (150, 150, 150), 1)
                 else:
                     cv2.circle(img, positions[i], 30, mat['color'], -1)
-                    cv2.circle(img, positions[i], positions[i], 30, (255, 255, 255), 2)
+                    cv2.circle(img, positions[i], 30, (255, 255, 255), 2)
                     cv2.putText(img, mat['label'], (positions[i][0] - 15, positions[i][1] + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
             # 目标物料青色选中框
             target_idx = step.get('material_idx', 0)
@@ -921,11 +958,6 @@ def get_info():
     前端JS定时调用，获取所有实时仿真数据，用于前端独立面板展示
     返回完整JSON数据包，包含任务、小车、分数、日志、帧率全部信息
     """
-    # 初始化当前动作字符串
-    current_task = ""
-    # 如果任务未执行完，读取当前任务描述
-    if simulator.mission_step < len(simulator.mission_queue):
-        current_task = simulator.mission_queue[simulator.mission_step]['desc']
     # 组装所有仿真状态并转为JSON返回
     return jsonify({
         'task_code': simulator.task_code,                          # 全局任务码
@@ -937,7 +969,7 @@ def get_info():
         'mission_step': simulator.mission_step,                     # 当前执行任务下标
         'mission_progress': simulator.mission_progress,             # 任务完成百分比0~100
         'total_score': simulator.total_score,                       # 本局总得分
-        'current_task': current_task,                               # 当前动作文字
+        'current_task': simulator.current_action,                   # 当前动作文字（直接使用内部状态）
         'car_pos': [int(simulator.car_pos[0]), int(simulator.car_pos[1])], # 小车坐标mm
         'car_angle': int(simulator.car_angle),                      # 小车朝向角度
         'has_material': simulator.has_material,                    # 是否携带物料布尔值

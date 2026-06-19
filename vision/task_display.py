@@ -11,10 +11,8 @@ from .qr_detector import TaskCodeParser
 
 
 class TaskDisplay:
-    """
-    任务码显示装置生成器
-    黑底亮色字体显示，模拟比赛现场的LED/OLED显示
-    """
+    """任务码显示装置生成器，黑底亮色字体模拟LED/OLED显示"""
+
     def __init__(self, width=400, height=200):
         self.width = width
         self.height = height
@@ -23,22 +21,19 @@ class TaskDisplay:
     def render(self, task_code, completed_steps=None):
         """
         渲染任务码显示图
+
         :param task_code: 任务码字符串 如 "156+123+516+231"
         :param completed_steps: 已完成步骤列表 [True, False, ...]
         :return: BGR格式显示图
         """
         display = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-        display[:] = (0, 0, 0)
 
-        # 标题
         cv2.putText(display, "TASK CODE", (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-        # 任务码 (大字体，模拟12mm字高)
         if task_code:
             cv2.putText(display, task_code, (10, 80),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 255, 0), 3)
-            # 解析并显示含义
             parsed = self.parser.parse(task_code)
             if parsed:
                 b1c, b1p, b2c, b2p = parsed
@@ -51,7 +46,6 @@ class TaskDisplay:
                 cv2.putText(display, info2, (10, 140),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
-        # 完成进度
         if completed_steps is not None:
             progress = sum(completed_steps)
             total = len(completed_steps) if completed_steps else 1
