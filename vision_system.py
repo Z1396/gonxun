@@ -35,6 +35,9 @@ def main():
         print("[注意] headless模式，不支持cv2.imshow图形窗口")
 
     fps_counter = FPSCounter(update_interval=10)
+    qr_fps_counter = FPSCounter(update_interval=10)
+    last_qr_data = None
+    qr_display_time = 0
 
     try:
         while True:
@@ -50,6 +53,62 @@ def main():
                             (processed_img.shape[1] - 120, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
                 cv2.imshow('Vision System', processed_img)
+
+                # 显示二维码摄像头画面并扫码
+                qr_success, qr_img = vision.camera.read_qr()
+                if qr_success and qr_img is not None:
+                    qr_fps = qr_fps_counter.tick()
+                    cv2.putText(qr_img, f"QR FPS: {qr_fps:.1f}",
+                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.8, (0, 255, 0), 2)
+
+                    # 识别二维码
+                    qr_data = vision.qr_detector.detect(qr_img)
+                    if qr_data:
+                        last_qr_data = qr_data
+                        qr_display_time = time.time()
+
+                        # 解析任务码
+                        task_result = vision.task_parser.parse(qr_data)
+                        if task_result:
+                            batch1_colors, batch1_pos, batch2_colors, batch2_pos = task_result
+                            color_names = ['', '红', '蓝', '绿', '黄', '黑', '浅蓝']
+
+                            # 显示任务码
+                            y_offset = 60
+                            cv2.putText(qr_img, f"Task: {qr_data}", (10, y_offset),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+                            y_offset += 30
+                            cv2.putText(qr_img, "Batch1:", (10, y_offset),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                            for i, (c, p) in enumerate(zip(batch1_colors, batch1_pos)):
+                                name = color_names[c] if c < len(color_names) else str(c)
+                                cv2.putText(qr_img, f"  {name}#{p}", (10, y_offset + 25 + i * 20),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
+                            y_offset += 90
+                            cv2.putText(qr_img, "Batch2:", (10, y_offset),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                            for i, (c, p) in enumerate(zip(batch2_colors, batch2_pos)):
+                                name = color_names[c] if c < len(color_names) else str(c)
+                                cv2.putText(qr_img, f"  {name}#{p}", (10, y_offset + 25 + i * 20),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                        else:
+                            cv2.putText(qr_img, f"QR: {qr_data}", (10, 60),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                            cv2.putText(qr_img, "Invalid task code", (10, 90),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                    elif last_qr_data and (time.time() - qr_display_time) < 3:
+                        # 识别失败但3秒内显示上次结果
+                        cv2.putText(qr_img, f"Last: {last_qr_data}", (10, 60),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    else:
+                        cv2.putText(qr_img, "No QR detected", (10, 60),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+                    cv2.imshow('QR Camera', qr_img)
+
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
             else:

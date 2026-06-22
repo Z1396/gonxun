@@ -11,7 +11,7 @@ import cv2
 class CameraManager:
     """双摄像头管理器：主摄像头 + 扫码摄像头"""
 
-    def __init__(self, main_index=0, qr_index=2,
+    def __init__(self, main_index=1, qr_index=2,
                  main_width=640, main_height=480,
                  qr_width=640, qr_height=480):
         self.main_index = main_index
