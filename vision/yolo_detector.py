@@ -121,3 +121,61 @@ class YOLOv8Detector:
         dummy = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)
         self.detect(dummy, verbose=False)
         logger.info("YOLOv8模型预热完成")
+
+    # 颜色名称映射：ColorDetector 颜色名 -> YOLO 类别名
+    COLOR_MAP = {
+        'red': 'red_block',
+        'blue': 'blue_block',
+        'green': 'green_block',
+        'yellow': 'yellow_block',
+        'black': 'black_block',
+        'light_blue': 'light_blue_block'
+    }
+
+    def detect_center(self, img, color, min_area=0, max_area=float('inf')):
+        """
+        兼容 ColorDetector.detect() 接口，返回指定颜色目标的中心点坐标
+        
+        :param img: BGR图像 (H,W,3) 或路径
+        :param color: 颜色名称，如 'red', 'blue', 'green'
+        :param min_area: 最小面积阈值（用于过滤小目标）
+        :param max_area: 最大面积阈值（用于过滤大目标）
+        :return: (x, y) 中心点整数坐标；无目标返回None
+        """
+        if img is None or color not in self.COLOR_MAP:
+            return None
+
+        # 映射颜色名到 YOLO 类别名
+        class_name = self.COLOR_MAP[color]
+        
+        # 获取类别ID
+        class_id = None
+        for cid, name in self.model.names.items():
+            if name == class_name:
+                class_id = cid
+                break
+
+        if class_id is None:
+            logger.warning(f"类别 {class_name} 不在模型中")
+            return None
+
+        # 执行检测
+        detections = self.detect(img, classes=[class_id])
+
+        if not detections:
+            return None
+
+        # 选择面积最大的目标
+        best_det = None
+        best_area = 0
+        for det in detections:
+            w, h = det.size
+            area = w * h
+            if min_area <= area <= max_area and area > best_area:
+                best_area = area
+                best_det = det
+
+        if best_det is None:
+            return None
+
+        return best_det.center

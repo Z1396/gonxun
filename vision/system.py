@@ -15,8 +15,8 @@ import config
 logger = logging.getLogger(__name__)
 
 # 相对导入：同目录下自研视觉算法类（包内文件才能使用.相对导入）
-# 色块识别器：HSV阈值识别红/绿/蓝物料
-from .color_detector import ColorDetector
+# YOLO目标检测器：使用YOLO模型识别物料
+from .yolo_detector import YOLOv8Detector
 # 环形靶标识别：三环、六环同心圆检测
 from .ring_detector import ThreeRingDetector, SixRingDetector
 # 二维码识别器 + 二维码任务字符串解析工具
@@ -64,7 +64,7 @@ class VisionSystem:
         baudrate = config.SERIAL_BAUDRATE if baudrate is None else baudrate
 
         # 实例化各类视觉识别算法对象，全局复用，避免重复创建开销
-        self.color_detector = ColorDetector()               # 色块识别实例
+        self.yolo_detector = YOLOv8Detector(model_path='yolo_pipeline/runs/detect/runs/material_detection-4/weights/best.pt', conf_threshold=0.5, device=0)  # YOLO目标检测实例
         self.three_ring_detector = ThreeRingDetector()      # 三环靶标识别实例
         self.six_ring_detector = SixRingDetector()          # 六环靶标识别实例（当前代码未使用，预留扩展）
         self.qr_detector = QRDetector()                    # 二维码识别实例
@@ -178,9 +178,9 @@ class VisionSystem:
         :return: 滤波后三色坐标列表；任意一种颜色未检测到则返回None，不向下位机发数据
         """
         positions = []
-        # 循环遍历三种目标颜色，依次执行色块识别
+        # 循环遍历三种目标颜色，依次执行YOLO检测
         for color, _, _ in color_specs:
-            pos = self.color_detector.detect(img, color, min_area, max_area)
+            pos = self.yolo_detector.detect_center(img, color, min_area, max_area)
             # 任意一个颜色缺失，直接返回None，中断本次任务
             if pos is None:
                 return None

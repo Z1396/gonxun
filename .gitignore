@@ -138,3 +138,6 @@ $RECYCLE.BIN/
 ._*
 .Spotlight-V100
 .Trashes._logger_
+yolo_dataset/
+yolo26n.pt
+

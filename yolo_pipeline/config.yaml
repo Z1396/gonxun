@@ -4,7 +4,7 @@
 # ==================== 项目配置 ====================
 project:
   name: "material_detection"           # 项目名称
-  base_dir: "./yolo_dataset"           # 数据集根目录
+  base_dir: "../yolo_dataset"          # 数据集根目录（相对于yolo_pipeline目录）
   output_dir: "./runs"                 # 训练输出目录
 
 # ==================== 类别定义 ====================
@@ -40,10 +40,10 @@ augmentation:
 training:
   model: "yolov8n.pt"                  # 预训练模型 (n/s/m/l/x)
   epochs: 100                          # 训练轮数
-  batch_size: 16                       # 批次大小（根据显存调整）
+  batch_size: 8                        # 批次大小（根据显存调整）
   imgsz: 640                           # 推理图像尺寸
   device: 0                            # GPU设备 (0=cuda:0, 'cpu')
-  workers: 8                           # 数据加载线程数
+  workers: 0                           # 数据加载线程数（0=主进程加载，避免多进程权限问题）
 
   # 学习率
   lr0: 0.01                            # 初始学习率

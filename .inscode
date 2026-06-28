@@ -1,4 +1,0 @@
-run = "python demo_app.py"
-is_gui = false
-is_resident = true
-is_html = false

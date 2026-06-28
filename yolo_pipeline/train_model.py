@@ -123,6 +123,9 @@ class ModelTrainer:
             # 优化器自动选择（AdamW/SGD由库自动适配）
             'optimizer': 'auto',
 
+            # 混合精度训练（网络不好时关闭AMP自动检查，避免下载测试模型卡住）
+            'amp': False,
+
             # 日志与可视化
             'verbose': True,  # 每轮打印详细训练日志
             'plots': True,    # 自动生成loss曲线、mAP曲线等图表

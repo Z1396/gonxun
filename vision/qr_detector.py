@@ -39,8 +39,8 @@ class QRDetector:
 
         n = len(bbox[0])
         for j in range(n):
-            p1 = tuple(bbox[0][j])
-            p2 = tuple(bbox[0][(j + 1) % n])
+            p1 = (int(bbox[0][j][0]), int(bbox[0][j][1]))
+            p2 = (int(bbox[0][(j + 1) % n][0]), int(bbox[0][(j + 1) % n][1]))
             cv2.line(img, p1, p2, self._BBOX_COLOR, self._BBOX_THICKNESS)
 
         xs = [p[0] for p in bbox[0]]
