@@ -8,6 +8,12 @@
 3. 执行训练并保存权重
 4. 输出训练曲线和指标
 
+Jetson Nano 优化：
+- 自动检测 Jetson 平台并调整训练参数
+- 降低推理尺寸（640→320）提升 FPS
+- 降低批次大小避免显存溢出
+- 禁用 workers 避免多进程问题
+
 使用方式:
   python train_model.py                              # 使用默认配置
   python train_model.py --config config.yaml         # 指定配置文件
@@ -42,6 +48,17 @@ try:
 except ImportError:
     YOLO_AVAILABLE = False
     logger.error("ultralytics未安装。请执行: pip install ultralytics")
+
+
+def is_jetson():
+    """检测是否在 Jetson 平台上运行"""
+    try:
+        with open('/etc/nv_tegra_release', 'r') as f:
+            return True
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
 
 
 class ModelTrainer:
@@ -90,23 +107,46 @@ class ModelTrainer:
 
     def _build_train_args(self) -> dict:
         """私有工具方法：读取配置类中的训练参数，构建model.train()所需完整参数字典
+        Jetson Nano 优化：自动调整参数避免内存溢出和提升训练速度
         :return: dict 可直接解包传入YOLO训练函数的参数字典
         """
         # 简写训练配置分组，减少重复代码
         t = self.config.training
+
+        # Jetson 平台性能优化
+        imgsz = t.imgsz
+        batch_size = t.batch_size
+        workers = t.workers
+
+        if is_jetson():
+            # Jetson Nano 优化：降低推理尺寸（减少显存占用）
+            if imgsz > 320:
+                logger.info(f"[Jetson] 推理尺寸自动降级: {imgsz} → 320（性能优化）")
+                imgsz = 320
+
+            # Jetson Nano 优化：降低批次大小（避免OOM）
+            if batch_size > 16:
+                logger.info(f"[Jetson] 批次大小自动降级: {batch_size} → 16（避免OOM）")
+                batch_size = 16
+
+            # Jetson Nano 优化：禁用多进程加载（避免权限问题）
+            if workers > 0:
+                logger.info(f"[Jetson] workers自动设为0（避免多进程问题）")
+                workers = 0
+
         return {
             # 数据集yaml配置文件路径
             'data': self.config.get_data_yaml_path(),
             # 总训练轮数 epoch
             'epochs': t.epochs,
             # 模型输入图像统一缩放尺寸
-            'imgsz': t.imgsz,
+            'imgsz': imgsz,
             # 每批次训练图片数量
-            'batch': t.batch_size,
+            'batch': batch_size,
             # 训练设备：GPU卡号数字 / cpu字符串
             'device': t.device if t.device >= 0 else 'cpu',
             # DataLoader加载数据的子进程数量
-            'workers': t.workers,
+            'workers': workers,
 
             # 学习率相关参数
             'lr0': t.lr0,       # 初始学习率

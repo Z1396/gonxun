@@ -6,8 +6,13 @@ YOLOv8 目标初步检测模块
 
 依赖：ultralytics >= 8.0.0, torch
 未安装时给出明确提示，支持优雅降级
+
+Jetson Nano 优化：
+- 自动检测 Jetson 平台并降低推理尺寸（640→320）
+- 支持 FP16 半精度推理
 """
 import logging
+import os
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -18,6 +23,17 @@ try:
 except ImportError:
     YOLO_AVAILABLE = False
     logger.warning("ultralytics未安装，YOLOv8检测不可用。安装: pip install ultralytics")
+
+
+def is_jetson():
+    """检测是否在 Jetson 平台上运行"""
+    try:
+        with open('/etc/nv_tegra_release', 'r') as f:
+            return True
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
 
 
 class Detection:
@@ -58,25 +74,35 @@ class YOLOv8Detector:
     """YOLOv8 目标检测器"""
 
     def __init__(self, model_path='yolov8n.pt', conf_threshold=0.5, iou_threshold=0.45,
-                 device=None, imgsz=640):
+                 device=None, imgsz=640, half=False):
         """
         :param model_path: 模型权重路径 (.pt) 或模型规格名 (yolov8n/s/m/l/x)
         :param conf_threshold: 置信度阈值
         :param iou_threshold: NMS IoU 阈值
         :param device: 推理设备 'cpu'/'cuda:0'/None(自动)
         :param imgsz: 推理图像尺寸
+        :param half: 是否使用FP16半精度推理（Jetson推荐True）
         """
         if not YOLO_AVAILABLE:
             raise RuntimeError(
                 "ultralytics未安装，无法使用YOLOv8。请执行: pip install ultralytics"
             )
+
+        # Jetson 平台自动优化
+        self._is_jetson = is_jetson()
+        if self._is_jetson and imgsz > 320:
+            logger.info(f"[Jetson] 推理尺寸自动降级: {imgsz} → 320（性能优化）")
+            imgsz = 320
+            half = True  # Jetson 默认开启 FP16
+
         self.model_path = model_path
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
         self.device = device
         self.imgsz = imgsz
+        self.half = half
         self.model = YOLO(model_path)
-        logger.info(f"YOLOv8模型已加载: {model_path}")
+        logger.info(f"YOLOv8模型已加载: {model_path}, imgsz={imgsz}, half={half}")
 
     def detect(self, img, classes=None, verbose=False):
         """
@@ -93,6 +119,7 @@ class YOLOv8Detector:
         results = self.model.predict(
             source=img, conf=self.conf_threshold, iou=self.iou_threshold,
             imgsz=self.imgsz, device=self.device, classes=classes,
+            half=self.half,  # FP16 半精度推理
             verbose=verbose
         )
         return self._parse_results(results[0])

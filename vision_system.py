@@ -6,8 +6,13 @@
 使用方式:
   python vision_system.py            # 启动视觉主循环
   python vision_system.py test       # 运行单元测试
+
+Jetson Nano headless模式：
+- 自动检测无GUI环境（无DISPLAY环境变量）
+- 检测结果保存到 output/ 目录
 """
 import cv2
+import os
 import time
 import logging
 import config
@@ -15,6 +20,17 @@ import config
 logging.basicConfig(level=getattr(logging, config.LOG_LEVEL), format=config.LOG_FORMAT)
 
 from vision import VisionSystem, FPSCounter, check_gui_available, generate_test_frame
+
+
+def is_headless():
+    """检测是否为 headless 模式（无显示器）"""
+    # 方式1：检查 DISPLAY 环境变量
+    if 'DISPLAY' not in os.environ:
+        return True
+    # 方式2：检查 check_gui_available
+    if not check_gui_available():
+        return True
+    return False
 
 
 def main():
@@ -30,14 +46,17 @@ def main():
     print("\n系统已启动，按 'q' 退出")
     print("模式说明: 0=待机, 1=三色物料, 3=色环定位, 4=码垛定位, 9=二维码")
 
-    gui_available = check_gui_available()
-    if not gui_available:
-        print("[注意] headless模式，不支持cv2.imshow图形窗口")
+    # 检测 headless 模式（Jetson Nano 无远程桌面）
+    headless = is_headless()
+    if headless:
+        print("[Jetson] headless模式，检测结果将保存到 output/ 目录")
+        os.makedirs('output', exist_ok=True)
 
     fps_counter = FPSCounter(update_interval=10)
     qr_fps_counter = FPSCounter(update_interval=10)
     last_qr_data = None
     qr_display_time = 0
+    frame_count = 0  # 帧计数器（用于 headless 保存）
 
     try:
         while True:
@@ -47,11 +66,15 @@ def main():
 
             processed_img = vision.process_frame(img)
             fps = fps_counter.tick()
+            frame_count += 1
 
-            if gui_available:
-                cv2.putText(processed_img, f"FPS: {fps:.1f}",
-                            (processed_img.shape[1] - 120, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            # 绘制 FPS
+            cv2.putText(processed_img, f"FPS: {fps:.1f}",
+                        (processed_img.shape[1] - 120, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+            if not headless:
+                # 有 GUI 环境：显示实时画面
                 cv2.imshow('Vision System', processed_img)
 
                 # 显示二维码摄像头画面并扫码
@@ -112,14 +135,19 @@ def main():
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
             else:
-                print(f"[帧] 模式={vision.serial_comm.unit} FPS={fps:.1f}")
-                time.sleep(0.5)
+                # headless 模式（Jetson Nano 无GUI）
+                # 每30帧保存一次检测结果（约每秒1帧）
+                if frame_count % 30 == 0:
+                    output_path = f"output/frame_{frame_count}.jpg"
+                    cv2.imwrite(output_path, processed_img)
+                    print(f"[Headless] 已保存: {output_path} | 模式={vision.serial_comm.unit} FPS={fps:.1f}")
+                time.sleep(0.01)  # 避免CPU占用100%
 
     except KeyboardInterrupt:
         print("\n用户中断")
     finally:
         vision.camera.close()
-        if gui_available:
+        if not headless:
             cv2.destroyAllWindows()
         print("系统已关闭")
 

@@ -1,6 +1,10 @@
 """
 全局配置文件
 集中管理视觉系统与仿真系统的可调参数，避免硬编码分散在各模块中
+
+平台配置说明：
+- Windows: 使用当前默认配置
+- Jetson Nano: 需修改以下配置项
 """
 
 # ========== 日志配置 ==========
@@ -8,15 +12,22 @@ LOG_LEVEL = "INFO"           # DEBUG/INFO/WARNING/ERROR
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 
 # ========== 串口通信配置 ==========
+# 【Jetson】修改为实际设备路径：ls /dev/ttyUSB* 或 ls /dev/ttyACM*
 SERIAL_PORT = '/dev/ttyCH341USB0'  # Linux 默认 CH341 串口设备
+# Jetson 常见路径：
+# - USB转串口：'/dev/ttyUSB0'
+# - Arduino/单片机：'/dev/ttyACM0'
+# - CH341芯片：'/dev/ttyCH341USB0'
+
 SERIAL_BAUDRATE = 115200
 SERIAL_TIMEOUT = 0.05
-SERIAL_MOCK = True                # 默认模拟串口（无硬件时调试）
+SERIAL_MOCK = True                # 【Jetson】连接真实硬件时改为 False
 SERIAL_MOCK_CYCLE = True          # 模拟模式是否循环切换 unit
 
 # ========== 摄像头配置 ==========
-CAMERA_MAIN_INDEX = 1
-CAMERA_QR_INDEX = 2
+# 【Jetson】使用 v4l2-ctl --list-devices 检测实际索引
+CAMERA_MAIN_INDEX = 1  # 【Jetson】通常是 0
+CAMERA_QR_INDEX = 2    # 【Jetson】如只有一个摄像头，改为 0 或禁用二维码功能
 CAMERA_MAIN_WIDTH = 640
 CAMERA_MAIN_HEIGHT = 480
 CAMERA_QR_WIDTH = 640

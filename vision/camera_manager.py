@@ -64,6 +64,16 @@ class CameraManager:
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
+        # Jetson/Linux 曝光设置（减少50Hz灯光频闪）
+        if platform.system() == 'Linux':
+            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # 手动曝光模式
+            cap.set(cv2.CAP_PROP_EXPOSURE, 120)      # Jetson用正值
+            cap.set(cv2.CAP_PROP_GAIN, 15)           # 增益
+        else:
+            # Windows
+            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)  # 手动曝光
+            cap.set(cv2.CAP_PROP_EXPOSURE, -5)         # Windows用负值
+
     def _open_one(self, index, resolution, name, backend=None):
         """打开单个摄像头，支持多后端尝试和分辨率降级"""
         if backend is None:
@@ -83,10 +93,7 @@ class CameraManager:
             return None
 
         # 尝试设置分辨率，失败则降级
-        width, height = resolution
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self._configure_capture(cap, resolution)
 
         # 验证实际分辨率
         actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
