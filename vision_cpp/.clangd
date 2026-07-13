@@ -1,0 +1,24 @@
+CompileFlags:
+  CompilationDatabase: .
+  Add:
+    - "-I/home/pldx/Desktop/gonxun/vision_cpp/include"
+    - "-I/home/pldx/Desktop/gonxun/core/include"
+    - "-I/usr/local/include/opencv4"
+  Remove:
+    - "-Werror"
+    - "-Wunknown-warning-option"
+    - "-Wreorder"
+
+Diagnostics:
+  UnusedIncludes: None
+  MissingIncludes: None
+  Suppress:
+    - pp_file_not_found
+    - pp_through_undef
+    - pp_unmatched_endif
+    - reorder
+    - unused-parameter
+    - c++2b-extensions
+
+# 使用 compile_commands.json（由 CMake 生成）
+# clangd 会从编译数据库读取正确的编译选项

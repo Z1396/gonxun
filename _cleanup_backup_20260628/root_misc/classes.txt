@@ -1,6 +1,0 @@
-red_block
-blue_block
-green_block
-yellow_block
-black_block
-light_blue_block

@@ -1,0 +1,119 @@
+# ============================================================
+# Gonxun 系统配置文件 (YAML 1.2)
+# 工创赛2025智能物流搬运系统
+# ============================================================
+#
+# 使用方式:
+#   程序启动时会自动加载此配置文件
+#   修改后需重启程序生效
+#
+# ============================================================
+
+# ========== 日志配置 ==========
+logging:
+  # 日志级别: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: "INFO"
+  # 日志格式 (Python logging 格式)
+  format: "%(asctime)s [%(levelname)s] %(message)s"
+
+# ========== 串口通信配置 ==========
+serial:
+  # 串口设备路径
+  # Linux: /dev/ttyUSB0, /dev/ttyCH341USB0, /dev/ttyACM0
+  # Windows: COM1, COM2, COM3
+  port: "/dev/ttyCH341USB0"
+  # 波特率 (bps)
+  # 常用值: 9600, 19200, 38400, 57600, 115200, 230400
+  baudrate: 115200
+  # 读写超时时间 (秒)
+  timeout: 0.05
+  # 是否使用模拟串口 (调试模式)
+  # true: 不连接真实硬件，模拟收发数据
+  # false: 连接真实串口设备
+  mock: true
+  # 模拟模式下是否循环发送测试数据
+  mock_cycle: true
+
+# ========== 摄像头配置 ==========
+camera:
+  # 主摄像头 (物料/色环识别)
+  main:
+    # 设备索引 (/dev/video0 对应索引 0)
+    index: 1
+    # 分辨率
+    width: 640
+    height: 480
+  # 扫码摄像头 (二维码识别)
+  qr:
+    index: 2
+    width: 640
+    height: 480
+
+# ========== 颜色识别配置 ==========
+color_detection:
+  # 最小识别面积 (像素)
+  # 过小的色块会被过滤，避免噪点干扰
+  min_area: 2000
+  # 停靠区最小面积 (像素)
+  dock_min_area: 3000
+
+# ========== 卡尔曼滤波配置 ==========
+kalman_filter:
+  # 过程噪声协方差 Q
+  # 值越大，对测量值的信任度越高，响应越快但越不稳定
+  # 推荐范围: 1e-6 ~ 1e-4
+  Q: 0.00001
+  # 测量噪声协方差 R
+  # 值越大，对预测值的信任度越高，响应越慢但越稳定
+  # 推荐范围: 1e-3 ~ 1e-1
+  R: 0.01
+
+# ========== 仿真场地配置 ==========
+# 所有尺寸单位: 毫米 (mm)
+field:
+  # 场地总尺寸 (正方形)
+  size: 2400
+  # 像素-毫米转换比例
+  # 计算: 显示宽度 / 场地宽度
+  pixel_per_mm: 0.22
+  # 车道配置
+  lane:
+    # 车道宽度
+    width: 400
+    # 车道中心线位置
+    center: 1200
+    # 车道起始位置
+    start: 1000
+    # 车道结束位置
+    end: 1400
+
+# ========== YOLO 模型配置 ==========
+yolo:
+  # 模型路径
+  # PyTorch 原生格式 (.pt)
+  model_path: "yolo_pipeline/runs/detect/runs/material_detection-4/weights/best.pt"
+  # TorchScript 格式 (.torchscript) - 用于 C++ 推理
+  torchscript_path: "yolo_pipeline/runs/detect/runs/material_detection-4/weights/best.torchscript"
+  # TensorRT Engine 格式 (.engine) - 用于 Jetson Nano 加速推理
+  # tensorrt_path: "models/best.engine"
+  # 置信度阈值
+  # 范围: 0.0 ~ 1.0，越高越严格
+  conf_threshold: 0.5
+  # NMS IOU 阈值
+  # 范围: 0.0 ~ 1.0，用于去除重叠检测框
+  iou_threshold: 0.45
+  # 输入图像尺寸
+  # 常用值: 320, 416, 512, 640
+  imgsz: 640
+  # 是否使用半精度推理 (FP16)
+  # 仅在支持 CUDA 的 GPU 上有效
+  half: false
+
+# ========== 系统配置 ==========
+system:
+  # 程序版本
+  version: "3.0.0"
+  # 项目名称
+  name: "GonxunSystem"
+  # 描述
+  description: "工创赛2025智能物流搬运系统"
