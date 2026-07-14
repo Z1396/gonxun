@@ -160,6 +160,11 @@ add_library(gonxun_core SHARED
     core/src/app_signals.cpp
     core/src/cli_parser.cpp
     core/src/vision_controller.cpp
+    core/src/astar_planner.cpp
+    core/src/task_state_machine.cpp
+    core/src/robot_controller.cpp
+    core/src/task_simulator.cpp
+    core/src/grid_planner.cpp
     config/src/config_loader.cpp
     # 头文件（用于 AUTOMOC）
     core/include/vision_controller.hpp
@@ -261,11 +266,13 @@ if(QT_AVAILABLE)
     set(CMAKE_AUTORCC ON)
     set(CMAKE_AUTOUIC ON)
 
-    # GUI源码：主函数、主窗口、画布控件
+    # GUI源码：主函数、主窗口、画布控件、数据面板、仿真控制器
     set(GUI_SOURCES
         main.cpp
         gui/src/mainwindow.cpp
         gui/src/courtmapwidget.cpp
+        gui/src/data_panel_widget.cpp
+        gui/src/simulation_controller.cpp
     )
 
     # 扫描所有GUI头文件（自动过滤不存在的文件）
@@ -274,6 +281,8 @@ if(QT_AVAILABLE)
         gui/include/mainwindow.hpp
         gui/include/courtmapwidget.h
         gui/include/courtmapwidget.hpp
+        gui/include/data_panel_widget.h
+        gui/include/simulation_controller.h
     )
     set(EXISTING_GUI_HEADERS "")
     foreach(H ${GUI_HEADERS})

@@ -17,8 +17,10 @@ namespace gonxun {
 struct CliOptions {
     bool mockSerial{false};       // 是否模拟串口
     bool headless{false};         // 是否无头模式
+    bool simulate{false};         // 是否仿真模式
     std::string configPath;       // 配置文件路径
     std::string serialPort;       // 串口设备路径
+    std::string taskCode;         // 任务码（仿真用）
 };
 
 /**

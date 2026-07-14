@@ -4,10 +4,12 @@
  * 核心特性：模块化封装、低耦合、多启动模式、优雅启停
  *
  * 完整启动用法:
- *   ./CourtMapViewer                    # 正常GUI启动，界面手动控制视觉系统启停
- *   ./CourtMapViewer --mock-serial      # 调试模式：模拟串口，无需真实硬件
- *   ./CourtMapViewer --headless         # 服务器部署：无头后台运行，无GUI界面
- *   ./CourtMapViewer --config path.yaml # 自定义加载指定配置文件
+ *   ./CourtMapViewer                        # 正常GUI启动，界面手动控制视觉系统启停
+ *   ./CourtMapViewer --mock-serial          # 调试模式：模拟串口，无需真实硬件
+ *   ./CourtMapViewer --headless             # 服务器部署：无头后台运行，无GUI界面
+ *   ./CourtMapViewer --config path.yaml     # 自定义加载指定配置文件
+ *   ./CourtMapViewer --simulate             # 仿真模式：不连接硬件，模拟完整任务流程
+ *   ./CourtMapViewer --simulate --task-code 312  # 仿真模式 + 指定任务码
  */
 
 // Qt基础核心依赖
@@ -22,6 +24,7 @@
 #include "app_signals.hpp"  // 应用全局信号管理：进程信号捕获、全局运行状态管控、优雅退出
 #include "cli_parser.hpp"   // 命令行参数解析器：独立封装启动参数解析逻辑
 #include "vision_controller.hpp" // 视觉线程控制器：统一管理视觉子线程启停、资源回收
+#include "task_simulator.hpp"    // 任务仿真系统：任务码→程序生成→模拟执行→报告
 
 // 程序唯一入口函数
 int main(int argc, char *argv[])
@@ -40,6 +43,18 @@ int main(int argc, char *argv[])
     const auto& cfg = configLoader.config();
 
     // ========== 3. 初始化Qt应用实例 ==========
+    // 仿真模式无显示器时使用 offscreen 平台
+    bool wantSimulate = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--simulate") {
+            wantSimulate = true;
+            break;
+        }
+    }
+    if (wantSimulate) {
+        qputenv("QT_QPA_PLATFORM", "offscreen");
+    }
+
     // 创建Qt应用核心对象，接管程序事件循环
     QApplication app(argc, argv);
     // 从配置文件读取并设置程序名称
@@ -80,7 +95,46 @@ int main(int argc, char *argv[])
         cfg.camera.qr.index
     );
 
-    // ========== 6. 无头模式逻辑（后台部署模式） ==========
+    // ========== 6. 仿真模式（不连接硬件，模拟完整任务流程） ==========
+    if (options.simulate) {
+        std::cout << "[Main] 系统运行【仿真模式】" << std::endl;
+
+        gonxun::TaskSimulator simulator;
+
+        // 设置任务码
+        if (!simulator.setTaskCode(options.taskCode)) {
+            std::cerr << "[Main] 任务码非法: " << options.taskCode << std::endl;
+            return 1;
+        }
+
+        // 设置循环次数和速度
+        simulator.setTotalCycles(2);
+        simulator.setSpeedMultiplier(10.0);  // 10倍速仿真
+
+        // 注册回调：实时打印步骤执行情况
+        simulator.onStep([](const gonxun::StepRecord& r) {
+            std::cout << "  [步骤 " << r.stepIndex << "] "
+                      << r.timestamp << " | "
+                      << (r.success ? "OK" : "ERR") << " | "
+                      << r.result
+                      << " (" << r.duration << "s)" << std::endl;
+        });
+
+        // 注册回调：状态变更通知
+        simulator.onStateChange([](gonxun::TaskState oldState, gonxun::TaskState newState) {
+            std::cout << "  [状态] " << gonxun::TaskStateMachine::stateToString(oldState)
+                      << " -> " << gonxun::TaskStateMachine::stateToString(newState) << std::endl;
+        });
+
+        // 运行仿真
+        bool success = simulator.run();
+
+        // 输出结果
+        std::cout << "\n[Main] 仿真" << (success ? "成功" : "失败") << std::endl;
+        return success ? 0 : 1;
+    }
+
+    // ========== 7. 无头模式逻辑（后台部署模式） ==========
     // 适用于：无显示器服务器、后台常驻运行、纯算法调试场景
     if (options.headless) {
         std::cout << "[Main] 系统运行【无头后台模式】" << std::endl;
@@ -99,7 +153,7 @@ int main(int argc, char *argv[])
         return 0;
     }
 
-    // ========== 7. 标准GUI可视化模式（人机交互模式） ==========
+    // ========== 8. 标准GUI可视化模式（人机交互模式） ==========
     std::cout << "[Main] 系统运行【GUI可视化模式】，启动界面中..." << std::endl;
 
     // 创建主窗口UI实例
@@ -116,11 +170,11 @@ int main(int argc, char *argv[])
     // 界面点击【停止视觉】按钮 -> 触发控制器停止视觉线程
     QObject::connect(&window, &MainWindow::visionStopRequested, &controller, &gonxun::VisionController::stop);
 
-    // ========== 8. 启动Qt事件循环（程序主循环） ==========
+    // ========== 9. 启动Qt事件循环（程序主循环） ==========
     // 阻塞执行，监听界面点击、信号触发、窗口事件
     int ret = app.exec();
 
-    // ========== 9. 程序退出收尾：安全释放资源 ==========
+    // ========== 10. 程序退出收尾：安全释放资源 ==========
     // 主动停止视觉子线程，回收摄像头、算法资源
     controller.stop();
     // 标记全局程序退出状态，终止所有后台循环

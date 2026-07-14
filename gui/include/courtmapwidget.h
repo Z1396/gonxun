@@ -95,6 +95,32 @@ public:
     // 清空所有障碍物标记
     void clearAllMarks();
 
+    /**
+     * @brief 设置机器人位置（场地坐标，毫米）
+     * @param pos 机器人在场地坐标系中的位置
+     * @param angle 机器人朝向角度（度，0=东，逆时针正）
+     */
+    void setRobotPos(const QPointF &pos, qreal angle = 0.0);
+
+    /**
+     * @brief 设置机器人是否可见
+     */
+    void setRobotVisible(bool visible) { m_robotVisible = visible; update(); }
+
+    /**
+     * @brief 获取机器人当前位置
+     */
+    QPointF robotPos() const { return m_robotPos; }
+    qreal robotAngle() const { return m_robotAngle; }
+    bool isRobotVisible() const { return m_robotVisible; }
+
+    /**
+     * @brief 设置路径可视化（用于显示 A* 规划的路径）
+     * @param points 路径点数组（场地坐标）
+     */
+    void setPath(const QVector<QPointF> &points);
+    void clearPath() { m_pathPoints.clear(); update(); }
+
 signals:
     /**
      * @brief 障碍物标记状态改变信号
@@ -151,6 +177,10 @@ private:
     void drawQRBoard(QPainter &p);
     // 绘制所有可点击障碍物
     void drawObstacles(QPainter &p);
+    // 绘制机器人（四驱麦轮，俯视图）
+    void drawRobot(QPainter &p);
+    // 绘制路径轨迹
+    void drawPath(QPainter &p);
     // 绘制场地尺寸标注（长/宽刻度）
     void drawDimensionMarks(QPainter &p);
 
@@ -197,6 +227,14 @@ private:
     bool m_markMode = false;              // 障碍物标记模式开关
     bool m_startZoneSelectable = false;   // 起点选择模式开关
     int m_selectedStartZone = -1;         // 当前选中起点下标，-1代表未选中
+
+    // 机器人状态
+    QPointF m_robotPos{2250, 150};        // 机器人位置（场地坐标，毫米）
+    qreal m_robotAngle = 180.0;           // 机器人朝向（度，0=东，逆时针正）
+    bool m_robotVisible = false;          // 机器人是否可见
+
+    // 路径可视化
+    QVector<QPointF> m_pathPoints;        // 路径点数组（场地坐标）
 };
 
 #endif

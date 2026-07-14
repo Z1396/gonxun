@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QSplitter>
 
 namespace {
 const char* BTN_STYLE =
@@ -18,8 +19,8 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
     setWindowTitle("赛场地图");
-    resize(480, 520);
-    setMinimumSize(320, 350);
+    resize(780, 560);
+    setMinimumSize(600, 400);
 
     QWidget *central = new QWidget(this);
     QVBoxLayout *layout = new QVBoxLayout(central);
@@ -48,29 +49,58 @@ MainWindow::MainWindow(QWidget *parent)
     m_selectStartBtn->setCheckable(true);
     m_selectStartBtn->setStyleSheet(buttonStyle("#27ae60", "#229954", "#16a085"));
 
-    // 4. 底部状态提示文本标签
+    // 4. 仿真按钮
+    m_simBtn = new QPushButton("仿真", central);
+    m_simBtn->setMinimumHeight(36);
+    m_simBtn->setCheckable(true);
+    m_simBtn->setStyleSheet(buttonStyle("#8e44ad", "#7d3c98", "#c0392b"));
+
+    // 5. 底部状态提示文本标签
     m_statusLabel = new QLabel(central);
     m_statusLabel->setFont(QFont("Microsoft YaHei", 10));
 
     toolbar->addWidget(m_startBtn);
     toolbar->addWidget(m_markBtn);
     toolbar->addWidget(m_selectStartBtn);
+    toolbar->addWidget(m_simBtn);
     toolbar->addWidget(m_statusLabel);
     toolbar->addStretch();
 
     m_courtMap = new CourtMapWidget(central);
+    m_dataPanel = new DataPanelWidget(central);
+
+    // 左右分栏：地图 + 数据面板
+    QSplitter *splitter = new QSplitter(Qt::Horizontal, central);
+    splitter->addWidget(m_courtMap);
+    splitter->addWidget(m_dataPanel);
+    splitter->setStretchFactor(0, 3);  // 地图占 3/4
+    splitter->setStretchFactor(1, 1);  // 数据面板占 1/4
+    splitter->setSizes({500, 260});
 
     layout->addLayout(toolbar);
-    layout->addWidget(m_courtMap, 1);
+    layout->addWidget(splitter, 1);
 
     setCentralWidget(central);
+
+    // 初始化仿真控制器
+    m_simController = new SimulationController(m_courtMap, m_dataPanel, this);
+    m_simController->setAnimationInterval(50);   // 20fps
+    m_simController->setDwellTime(800);           // 800ms 停留
+    m_simController->setTotalCycles(1);           // 1 轮循环
 
     // ==================== 信号槽绑定 ====================
     connect(m_startBtn, &QPushButton::clicked, this, &MainWindow::onStartButtonClicked);
     connect(m_markBtn, &QPushButton::clicked, this, &MainWindow::onMarkButtonClicked);
     connect(m_selectStartBtn, &QPushButton::clicked, this, &MainWindow::onSelectStartZoneClicked);
+    connect(m_simBtn, &QPushButton::clicked, this, &MainWindow::onSimButtonClicked);
     connect(m_courtMap, &CourtMapWidget::obstacleToggled, this, &MainWindow::onObstacleToggled);
     connect(m_courtMap, &CourtMapWidget::startZoneSelected, this, &MainWindow::onStartZoneSelected);
+    connect(m_simController, &SimulationController::logMessage, this, &MainWindow::onSimLog);
+    connect(m_simController, &SimulationController::simulationFinished, [this](bool success) {
+        m_simBtn->setText("仿真");
+        m_simBtn->setChecked(false);
+        updateStatus();
+    });
 
     updateStatus();
 }
@@ -157,7 +187,10 @@ void MainWindow::updateStatus()
     QString status;
     QString color;
 
-    if (m_visionRunning) {
+    if (m_simController && m_simController->isRunning()) {
+        status = QString("仿真运行中 | 障碍物: %1个").arg(count);
+        color = "color: #8e44ad; font-weight: bold;";
+    } else if (m_visionRunning) {
         status = QString("视觉系统运行中 | 障碍物: %1个").arg(count);
         color = "color: #27ae60; font-weight: bold;";
     } else if (m_markBtn->isChecked()) {
@@ -174,4 +207,31 @@ void MainWindow::updateStatus()
 
     m_statusLabel->setText(status);
     m_statusLabel->setStyleSheet(color);
+}
+
+void MainWindow::onSimButtonClicked()
+{
+    if (m_simController->isRunning()) {
+        // 停止仿真
+        m_simController->stop();
+        m_simBtn->setText("仿真");
+        m_simBtn->setChecked(false);
+    } else {
+        // 启动仿真（SimulationController 内部会检查启停区）
+        bool ok = m_simController->start("312");
+        if (ok) {
+            m_simBtn->setText("停止仿真");
+            m_simBtn->setChecked(true);
+        } else {
+            m_simBtn->setChecked(false);
+        }
+    }
+    updateStatus();
+}
+
+void MainWindow::onSimLog(const QString& msg)
+{
+    // 将日志显示在状态栏
+    m_statusLabel->setText(msg);
+    m_statusLabel->setStyleSheet("color: #8e44ad; font-weight: bold;");
 }

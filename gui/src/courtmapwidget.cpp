@@ -8,6 +8,8 @@
 #include <QTouchEvent>
 // 径向渐变，用于原料区、机器人圆形渐变填充
 #include <QRadialGradient>
+// 路径绘制，用于机器人方向箭头
+#include <QPainterPath>
 
 // 构造函数：画布初始化
 CourtMapWidget::CourtMapWidget(QWidget *parent)
@@ -89,8 +91,7 @@ void CourtMapWidget::setMarkMode(bool enabled)
 void CourtMapWidget::setStartZoneSelectable(bool selectable)
 {
     m_startZoneSelectable = selectable;
-    // 关闭选择功能时，清空已选中区域下标
-    if (!selectable) m_selectedStartZone = -1;
+    // 注意：关闭选择模式时不清空已选中的区域，保留用户的选择
     update(); // 刷新启停区绘制样式
 }
 
@@ -158,6 +159,8 @@ void CourtMapWidget::paintEvent(QPaintEvent *event)
     drawRoughProcessArea(p);  // 粗加工区同心圆
     drawQRBoard(p);           // 侧边二维码板竖线+文字
     drawObstacles(p);         // 所有障碍物矩形（可标记变红）
+    drawPath(p);              // 路径轨迹（A*规划结果）
+    drawRobot(p);             // 机器人图标（选中启停区后显示）
     drawDimensionMarks(p);    // 尺寸标注线与文字
 }
 
@@ -497,6 +500,12 @@ void CourtMapWidget::handlePointSelection(const QPointF &pos)
         int idx = findStartZoneAt(pos);
         if (idx >= 0) {
             m_selectedStartZone = idx;
+            // 自动将机器人放置到所选启停区中心
+            QRectF zoneRect = m_zones[idx].rect;
+            m_robotPos = zoneRect.center();
+            // 朝向场地中心
+            m_robotAngle = (idx == 0) ? 225.0 : 315.0;  // 左下或左上方向
+            m_robotVisible = true;
             emit startZoneSelected(idx, m_zones[idx].name);
             update();
             return;
@@ -541,4 +550,125 @@ bool CourtMapWidget::event(QEvent *event)
     }
     // 其他事件交给Qt默认处理
     return QWidget::event(event);
+}
+
+// 设置机器人位置并触发重绘
+void CourtMapWidget::setRobotPos(const QPointF &pos, qreal angle)
+{
+    m_robotPos = pos;
+    m_robotAngle = angle;
+    m_robotVisible = true;
+    update();
+}
+
+// 设置路径可视化
+void CourtMapWidget::setPath(const QVector<QPointF> &points)
+{
+    m_pathPoints = points;
+    update();
+}
+
+// 绘制机器人：俯视图，四驱麦轮底盘
+void CourtMapWidget::drawRobot(QPainter &p)
+{
+    if (!m_robotVisible) return;
+
+    p.save();
+
+    // 移动到机器人位置并旋转
+    QPointF center = mapToWidget(m_robotPos);
+    p.translate(center);
+    // Qt 旋转方向：正值=顺时针，我们的角度是逆时针正，所以取负
+    p.rotate(-m_robotAngle);
+
+    // 机器人尺寸（场地坐标转换为像素）
+    // 真实机器人约 300x300mm
+    qreal bodyW = 300 * m_scale;
+    qreal bodyH = 300 * m_scale;
+    qreal wheelW = 40 * m_scale;
+    qreal wheelH = 80 * m_scale;
+
+    // ===== 1. 机器人底盘（圆角矩形） =====
+    QRectF bodyRect(-bodyW/2, -bodyH/2, bodyW, bodyH);
+    p.setPen(QPen(QColor(50, 50, 50), 2));
+    p.setBrush(QColor(241, 196, 15));  // 黄色底盘
+    p.drawRoundedRect(bodyRect, 8, 8);
+
+    // ===== 2. 四个麦克纳姆轮 =====
+    p.setBrush(QColor(30, 30, 30));
+    // 左前轮
+    p.drawRoundedRect(QRectF(-bodyW/2 - wheelW/2, -bodyH/2 + 10*m_scale, wheelW, wheelH), 3, 3);
+    // 右前轮
+    p.drawRoundedRect(QRectF(bodyW/2 - wheelW/2, -bodyH/2 + 10*m_scale, wheelW, wheelH), 3, 3);
+    // 左后轮
+    p.drawRoundedRect(QRectF(-bodyW/2 - wheelW/2, bodyH/2 - 10*m_scale - wheelH, wheelW, wheelH), 3, 3);
+    // 右后轮
+    p.drawRoundedRect(QRectF(bodyW/2 - wheelW/2, bodyH/2 - 10*m_scale - wheelH, wheelW, wheelH), 3, 3);
+
+    // ===== 3. 方向指示箭头（朝前） =====
+    QPainterPath arrow;
+    qreal arrowSize = bodyW * 0.25;
+    arrow.moveTo(0, -bodyH/2 + 15*m_scale);           // 箭头尖
+    arrow.lineTo(-arrowSize/2, -bodyH/2 + 15*m_scale + arrowSize);
+    arrow.lineTo(arrowSize/2, -bodyH/2 + 15*m_scale + arrowSize);
+    arrow.closeSubpath();
+    p.setBrush(QColor(231, 76, 60));  // 红色箭头
+    p.setPen(QPen(QColor(192, 57, 43), 1));
+    p.drawPath(arrow);
+
+    // ===== 4. 中心圆点 =====
+    p.setBrush(QColor(50, 50, 50));
+    p.setPen(Qt::NoPen);
+    p.drawEllipse(QPointF(0, 0), 5, 5);
+
+    // ===== 5. 机器人标签 =====
+    p.rotate(m_robotAngle);  // 反旋转，文字保持水平
+    p.setPen(QColor(50, 50, 50));
+    QFont font("Microsoft YaHei", 8);
+    font.setBold(true);
+    p.setFont(font);
+    p.drawText(QRectF(-40, bodyH/2 + 5*m_scale, 80, 20), Qt::AlignCenter, "机器人");
+
+    p.restore();
+}
+
+// 绘制路径轨迹
+void CourtMapWidget::drawPath(QPainter &p)
+{
+    if (m_pathPoints.size() < 2) return;
+
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, true);
+
+    // 绘制路径线（虚线）
+    QPen pathPen(QColor(41, 128, 185), 2, Qt::DashLine);
+    p.setPen(pathPen);
+
+    for (int i = 0; i < m_pathPoints.size() - 1; ++i) {
+        QPointF p1 = mapToWidget(m_pathPoints[i]);
+        QPointF p2 = mapToWidget(m_pathPoints[i + 1]);
+        p.drawLine(p1, p2);
+    }
+
+    // 绘制路径起点（绿色圆）
+    QPointF startPt = mapToWidget(m_pathPoints.first());
+    p.setBrush(QColor(39, 174, 96));
+    p.setPen(QPen(QColor(27, 120, 65), 2));
+    p.drawEllipse(startPt, 6, 6);
+
+    // 绘制路径终点（红色圆）
+    QPointF endPt = mapToWidget(m_pathPoints.last());
+    p.setBrush(QColor(231, 76, 60));
+    p.setPen(QPen(QColor(192, 57, 43), 2));
+    p.drawEllipse(endPt, 6, 6);
+
+    // 绘制中间路径点（小蓝点）
+    p.setBrush(QColor(52, 152, 219));
+    p.setPen(Qt::NoPen);
+    for (int i = 1; i < m_pathPoints.size() - 1; ++i) {
+        QPointF pt = mapToWidget(m_pathPoints[i]);
+        p.drawEllipse(pt, 3, 3);
+    }
+
+    p.restore();
 }
