@@ -1,43 +1,86 @@
-// 引入自定义摄像头控件头文件
+/**
+ * @file camerawidget.cpp
+ * @brief 摄像头控件实现文件
+ * 
+ * @details 本文件实现了摄像头显示和控制控件。
+ *          核心功能：
+ *          - 摄像头开启/关闭：支持多摄像头切换
+ *          - 实时帧显示：基于定时器的帧刷新机制
+ *          - FPS 统计：实时显示当前帧率
+ *          - 截图保存：保存当前帧为图片文件
+ *          - 曝光调节：调整摄像头曝光参数
+ *          
+ *          UI组件结构：
+ *          - 画面显示区域：QLabel 显示帧图像
+ *          - 控制按钮栏：开启/停止、截图、摄像头切换
+ *          - 状态信息栏：FPS、分辨率、摄像头状态
+ *          - 曝光调节栏：滑块调整曝光值
+ *          
+ *          帧刷新机制：
+ *          - 使用 QTimer 定时读取帧（默认 33ms，约 30fps）
+ *          - 使用 OpenCV VideoCapture 捕获帧
+ *          - 将 OpenCV Mat 转换为 QImage 显示
+ *          - 实时计算并显示 FPS
+ *          
+ *          截图保存：
+ *          - 保存路径：当前目录下的 screenshots/ 文件夹
+ *          - 文件名格式：screenshot_yyyyMMdd_HHmmss.png
+ *          - 使用 QDateTime 生成时间戳
+ *          
+ *          性能优化：
+ *          - 帧尺寸可配置（默认 640x480）
+ *          - 使用 QImage::Format_RGB888 减少格式转换开销
+ *          - 定时器间隔可调整
+ *          
+ * @see camerawidget.h 头文件定义
+ * @see mainwindow.cpp 使用此控件的主窗口
+ * 
+ * @author 工创赛2025智能物流搬运系统团队
+ * @date 2024-01-15
+ * @version 1.0.0
+ * @history 2024-01-15 初始版本
+ * @history 2024-02-15 新增曝光调节功能
+ * 
+ * @copyright 工创赛2025智能物流搬运系统
+ */
 #include "camerawidget.h"
-// 垂直布局、水平布局，用于搭建UI界面
 #include <QVBoxLayout>
 #include <QHBoxLayout>
-// 时间类：用于FPS计算、截图文件时间戳命名
 #include <QDateTime>
-// 文件目录类：用于截图文件保存路径管理
 #include <QDir>
-// 弹窗提示框：摄像头打开失败异常提示
 #include <QMessageBox>
-// 文本标签控件：画面显示、状态文字展示
 #include <QLabel>
 
 /**
- * @brief 摄像头控件构造函数
- * @param parent 父窗口对象，用于Qt对象树内存管理
- * @note 初始化成员变量、搭建UI、创建帧刷新定时器
+ * @brief CameraWidget 构造函数
+ * 
+ * @details 初始化摄像头控件，完成以下工作：
+ *          1. 初始化成员变量（默认参数）
+ *          2. 搭建 UI 界面
+ *          3. 创建帧刷新定时器（默认 30fps）
+ *          
+ *          默认参数：
+ *          - 摄像头索引：0
+ *          - 帧宽度：640
+ *          - 帧高度：480
+ *          - 刷新间隔：33ms（约 30fps）
+ *          
+ * @param parent 父窗口对象（默认 nullptr）
  */
 CameraWidget::CameraWidget(QWidget *parent)
     : QWidget(parent)
-    // 摄像头运行状态：默认未运行
-    , m_isRunning(false)
-    // 默认使用0号摄像头
-    , m_cameraIndex(0)
-    // 默认帧宽度640
-    , m_frameWidth(640)
-    // 默认帧高度480
-    , m_frameHeight(480)
-    // 帧计数器：用于统计FPS
-    , m_frameCount(0)
-    // 实时帧率
-    , m_fps(0)
-    // 上一次FPS统计的时间戳
-    , m_lastFpsTime(0)
+    , m_isRunning(false)  // 摄像头运行状态：默认未运行
+    , m_cameraIndex(0)  // 默认使用0号摄像头
+    , m_frameWidth(640)  // 默认帧宽度640
+    , m_frameHeight(480)  // 默认帧高度480
+    , m_frameCount(0)  // 帧计数器：用于统计FPS
+    , m_fps(0)  // 实时帧率
+    , m_lastFpsTime(0)  // 上一次FPS统计的时间戳
 {
     // 初始化所有UI控件与布局
     setupUI();
 
-    // 创建摄像头帧刷新定时器
+    // ==================== 帧刷新定时器 ====================
     m_timer = new QTimer(this);
     // 定时器超时触发帧更新函数
     connect(m_timer, &QTimer::timeout, this, &CameraWidget::updateFrame);

@@ -1,10 +1,53 @@
-// 引入自定义手势处理头文件
+/**
+ * @file touchhandler.cpp
+ * @brief 触摸事件处理器实现文件
+ * 
+ * @details 本文件实现了触摸屏手势识别和处理功能。
+ *          核心功能：
+ *          - 手势识别：单击、双击、长按、滑动、缩放
+ *          - 定时器机制：长按计时、双击判定窗口
+ *          - 参数配置：点击半径、长按时长、滑动距离、双击间隔
+ *          
+ *          手势判定规则：
+ *          - 单击：触摸按下后移动距离 < tapRadius，抬起时判定
+ *          - 双击：两次单击间隔 < doubleTapInterval，位置相近
+ *          - 长按：触摸按下后保持不动 > longPressDuration
+ *          - 滑动：触摸按下后移动距离 > swipeDistance
+ *          - 缩放：双指距离变化判定
+ *          
+ *          定时器机制：
+ *          - m_longPressTimer：长按计时器（单次触发）
+ *          - m_tapTimer：双击判定窗口定时器（单次触发）
+ *          
+ *          使用方式：
+ *          @code
+ *          TouchHandler* handler = new TouchHandler(this);
+ *          connect(handler, &TouchHandler::singleTap, [](QPointF pos) {
+ *              qDebug() << "Single tap at" << pos;
+ *          });
+ *          // 在 touchEvent() 中调用
+ *          handler->processTouchEvent(event);
+ *          @endcode
+ *          
+ *          注意事项：
+ *          - 适配5/7寸触控屏，参数已优化
+ *          - 支持多指触摸（缩放手势）
+ *          - 定时器使用 Qt::PreciseTimer 提高精度
+ *          
+ * @see touchhandler.h 头文件定义
+ * @see courtmapwidget.cpp 使用此处理器的地图控件
+ * 
+ * @author 工创赛2025智能物流搬运系统团队
+ * @date 2024-01-15
+ * @version 1.0.0
+ * @history 2024-01-15 初始版本
+ * @history 2024-02-10 新增缩放手势支持
+ * 
+ * @copyright 工创赛2025智能物流搬运系统
+ */
 #include "touchhandler.h"
-// 引入时间处理类，用于计算手势时间间隔、双击/长按计时
 #include <QDateTime>
-// 引入Qt触摸事件类，处理原生触屏触摸事件
 #include <QTouchEvent>
-// 引入数学库，用于距离、角度、开方等计算
 #include <math.h>
 
 /**

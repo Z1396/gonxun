@@ -5,7 +5,7 @@
 #include <QTimer>
 #include <QPointF>
 #include <QVector>
-#include <QTime>
+#include <QElapsedTimer>
 #include "courtmapwidget.h"
 #include "data_panel_widget.h"
 #include "astar_planner.hpp"
@@ -99,9 +99,7 @@ private:
 
     // 工具方法
     void updateObstaclesFromMap();
-    void updateDataPanel();
     void emitLog(const QString& msg);
-    QString phaseToString(SimPhase p) const;
 
     // 目标点定义（场地坐标，毫米）
     struct NavTarget {
@@ -140,8 +138,8 @@ private:
     int m_dwellTime = 1000;         // 停留时间（ms）
 
     // 统计数据
-    QTime m_segmentTimer;           // 当前段计时
-    QTime m_totalTimer;             // 总计时
+    QElapsedTimer m_segmentTimer;   // 当前段计时
+    QElapsedTimer m_totalTimer;     // 总计时
     double m_totalDistance = 0.0;   // 总行驶距离
     int m_totalSteps = 0;           // 总步数
 

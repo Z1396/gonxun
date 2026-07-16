@@ -1,8 +1,54 @@
+/**
+ * @file mainwindow.cpp
+ * @brief 主窗口实现文件
+ * 
+ * @details 本文件实现了智能物流搬运系统的主窗口界面。
+ *          核心功能：
+ *          - UI布局搭建：顶部工具栏、中央地图、右侧数据面板
+ *          - 按钮功能实现：开始、标记障碍物、选择启停区、仿真
+ *          - 信号槽连接：处理用户交互、状态更新
+ *          - 子模块集成：地图控件、数据面板、仿真控制器
+ *          
+ *          界面结构：
+ *          - 顶部工具栏：4个功能按钮 + 状态提示标签
+ *          - 中央区域：左侧地图（占3/4） + 右侧数据面板（占1/4）
+ *          - 使用 QSplitter 实现可拖拽调整的左右分栏
+ *          
+ *          按钮状态管理：
+ *          - 开始按钮：启动/停止任务执行
+ *          - 标记障碍物：切换障碍物标记模式
+ *          - 选择启停区：切换启停区选择模式
+ *          - 仿真按钮：启动/停止任务仿真
+ *          
+ *          状态同步机制：
+ *          - 使用 Qt 信号槽机制连接各模块
+ *          - 地图控件的障碍物变化、启停区选择通过信号传递
+ *          - 仿真控制器的日志、完成状态通过信号反馈
+ *          
+ * @see mainwindow.h 头文件定义
+ * @see courtmapwidget.h 场地地图控件
+ * @see data_panel_widget.h 数据面板控件
+ * @see simulation_controller.h 仿真控制器
+ * 
+ * @author 工创赛2025智能物流搬运系统团队
+ * @date 2024-01-15
+ * @version 1.0.0
+ * @history 2024-01-15 初始版本
+ * @history 2024-02-20 新增仿真控制器集成
+ * 
+ * @copyright 工创赛2025智能物流搬运系统
+ */
 #include "mainwindow.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QSplitter>
 
+/**
+ * @brief 按钮样式模板
+ * 
+ * @details 定义统一的按钮样式格式，包括正常、悬停、选中三种状态的颜色。
+ *          使用 QString::arg() 填充颜色值。
+ */
 namespace {
 const char* BTN_STYLE =
     "QPushButton { background-color: %1; color: white; border: none; "
@@ -10,52 +56,81 @@ const char* BTN_STYLE =
     "QPushButton:hover { background-color: %2; }"
     "QPushButton:checked { background-color: %3; }";
 
+/**
+ * @brief 生成按钮样式字符串
+ * 
+ * @param normal 正常状态颜色（十六进制）
+ * @param hover 悬停状态颜色（十六进制）
+ * @param checked 选中状态颜色（十六进制）
+ * @return 完整的按钮样式字符串
+ */
 QString buttonStyle(const char *normal, const char *hover, const char *checked) {
     return QString(BTN_STYLE).arg(normal, hover, checked);
 }
 }
 
+/**
+ * @brief MainWindow 构造函数
+ * 
+ * @details 初始化主窗口，完成以下工作：
+ *          1. 设置窗口标题、尺寸、最小尺寸
+ *          2. 搭建UI布局（顶部工具栏 + 中央分栏）
+ *          3. 创建子控件（地图、数据面板、仿真控制器）
+ *          4. 绑定信号槽连接
+ *          
+ * @param parent 父窗口对象（默认 nullptr）
+ */
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
+    // ==================== 窗口基本设置 ====================
     setWindowTitle("赛场地图");
-    resize(780, 560);
-    setMinimumSize(600, 400);
+    resize(780, 560);  // 默认窗口尺寸
+    setMinimumSize(600, 400);  // 最小窗口尺寸
 
+    // ==================== 中央容器与主布局 ====================
     QWidget *central = new QWidget(this);
     QVBoxLayout *layout = new QVBoxLayout(central);
-    layout->setContentsMargins(10, 10, 10, 10);
-    layout->setSpacing(8);
+    layout->setContentsMargins(10, 10, 10, 10);  // 布局边距
+    layout->setSpacing(8);  // 控件间距
 
-    // 顶部工具栏水平布局
+    // ==================== 顶部工具栏布局 ====================
     QHBoxLayout *toolbar = new QHBoxLayout();
-    toolbar->setSpacing(10);
+    toolbar->setSpacing(10);  // 按钮间距
 
-    // 1. 开始按钮
+    // ==================== 1. 开始按钮 ====================
+    // 功能：启动/停止任务执行
+    // 样式：绿色正常，深绿悬停，红色选中
     m_startBtn = new QPushButton("开始", central);
-    m_startBtn->setMinimumHeight(36);
-    m_startBtn->setCheckable(true);
+    m_startBtn->setMinimumHeight(36);  // 最小高度
+    m_startBtn->setCheckable(true);  // 可切换状态
     m_startBtn->setStyleSheet(buttonStyle("#2ecc71", "#27ae60", "#c0392b"));
 
-    // 2. 标记障碍物按钮
+    // ==================== 2. 标记障碍物按钮 ====================
+    // 功能：切换障碍物标记模式
+    // 样式：蓝色正常，深蓝悬停，红色选中
     m_markBtn = new QPushButton("标记障碍物", central);
     m_markBtn->setMinimumHeight(36);
     m_markBtn->setCheckable(true);
     m_markBtn->setStyleSheet(buttonStyle("#4a90e2", "#357abd", "#e74c3c"));
 
-    // 3. 选择启停区按钮
+    // ==================== 3. 选择启停区按钮 ====================
+    // 功能：切换启停区选择模式
+    // 样式：绿色正常，深绿悬停，青色选中
     m_selectStartBtn = new QPushButton("选择启停区", central);
     m_selectStartBtn->setMinimumHeight(36);
     m_selectStartBtn->setCheckable(true);
     m_selectStartBtn->setStyleSheet(buttonStyle("#27ae60", "#229954", "#16a085"));
 
-    // 4. 仿真按钮
+    // ==================== 4. 仿真按钮 ====================
+    // 功能：启动/停止任务仿真
+    // 样式：紫色正常，深紫悬停，红色选中
     m_simBtn = new QPushButton("仿真", central);
     m_simBtn->setMinimumHeight(36);
     m_simBtn->setCheckable(true);
     m_simBtn->setStyleSheet(buttonStyle("#8e44ad", "#7d3c98", "#c0392b"));
 
-    // 5. 底部状态提示文本标签
+    // ==================== 5. 状态提示标签 ====================
     m_statusLabel = new QLabel(central);
     m_statusLabel->setFont(QFont("Microsoft YaHei", 10));
 

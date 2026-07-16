@@ -156,7 +156,6 @@ endif()
 # SHARED = 动态库 .so
 # 存放：共享内存、配置读取
 add_library(gonxun_core SHARED
-    core/src/shared_memory.cpp
     core/src/app_signals.cpp
     core/src/cli_parser.cpp
     core/src/vision_controller.cpp
@@ -217,7 +216,6 @@ set(VISION_SOURCES
     vision_cpp/src/obstacle_detector.cpp  # 障碍物检测
     vision_cpp/src/yolo_detector.cpp      # YOLO深度学习检测
     vision_cpp/src/task_display.cpp       # 任务信息绘制
-    vision_cpp/src/jetson_optimizer.cpp   # Jetson性能优化
 )
 
 # 编译成静态库
