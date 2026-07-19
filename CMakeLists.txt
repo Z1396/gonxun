@@ -164,6 +164,8 @@ add_library(gonxun_core SHARED
     core/src/robot_controller.cpp
     core/src/task_simulator.cpp
     core/src/grid_planner.cpp
+    core/src/grid5_path_planner.cpp
+    core/src/shared_memory.cpp
     config/src/config_loader.cpp
     # 头文件（用于 AUTOMOC）
     core/include/vision_controller.hpp

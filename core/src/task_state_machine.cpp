@@ -1,29 +1,123 @@
 /**
- * 任务状态机实现
+ * @file task_state_machine.cpp
+ * @brief 任务状态机实现文件
+ * 
+ * @details 本文件实现了基于有限状态机（FSM）的任务管理功能。
+ *          核心特性：
+ *          - 状态定义：18个状态覆盖整个任务生命周期
+ *          - 事件驱动：通过事件触发状态转换
+ *          - 状态转换表：明确定义每个状态的事件响应
+ *          - 进度跟踪：实时更新任务进度信息
+ *          - 回调机制：支持状态变化和进度通知
+ * 
+ * @author 智能物流搬运系统开发团队
+ * @version 1.0
+ * @date 2025-01-01
+ * 
+ * @note 修改历史：
+ *       - 2025-01-01: 初始版本，实现基础状态机
+ *       - 2025-02-15: 增加循环和进度跟踪
+ *       
+ * @note 状态机模式：
+ *       - 状态：系统在某一时刻的状况
+ *       - 事件：触发状态转换的外部输入
+ *       - 转换：从当前状态到新状态的变化
+ *       - 动作：状态转换时执行的操作
+ *       
+ * @note 状态流程：
+ *       IDLE → MARKING → READY → MOVING_TO_QR → SCANNING_QR → QR_DONE
+ *       → MOVING_TO_MATERIAL → PICKING_MATERIAL → MATERIAL_DONE
+ *       → MOVING_TO_PROCESS → PLACING_MATERIAL → PROCESS_DONE
+ *       → MOVING_TO_BUFFER → BUFFER_DONE → [CYCLE_REPEAT or RETURNING]
+ *       → COMPLETED
+ *       
+ * @note 循环机制：
+ *       - 默认循环 2 次
+ *       - 每次循环重置物料计数
+ *       - 达到循环次数后返回启停区
+ *       
+ * @note 异常处理：
+ *       - ERROR 状态：可从任意状态进入
+ *       - 恢复机制：通过 RESET 事件重置，或 START_MISSION 事件重启
+ *       
+ * @see task_state_machine.hpp
  */
-
 #include "task_state_machine.hpp"
 #include <iostream>
 
 namespace gonxun {
 
+/**
+ * @brief 构造函数，初始化状态机
+ * 
+ * @details 设置初始状态为 IDLE，并初始化进度信息。
+ */
 TaskStateMachine::TaskStateMachine()
 {
-    m_currentState = TaskState::IDLE;
+    m_currentState = TaskState::IDLE;  // 初始状态：空闲
     m_progress = {};
     m_progress.currentState = m_currentState;
-    m_progress.currentCycle = 0;
-    m_progress.totalCycles = 2;     // 默认2轮循环
-    m_progress.materialsPicked = 0;
-    m_progress.materialsPlaced = 0;
-    m_progress.totalMaterials = 3;  // 默认3个物料
+    m_progress.currentCycle = 0;       // 当前循环次数
+    m_progress.totalCycles = 2;        // 默认2轮循环
+    m_progress.materialsPicked = 0;    // 已取物料数
+    m_progress.materialsPlaced = 0;    // 已放物料数
+    m_progress.totalMaterials = 3;     // 默认3个物料
     m_progress.stateDescription = stateToString(m_currentState);
 }
 
+/**
+ * @brief 处理事件并执行状态转换
+ * 
+ * @details 根据当前状态和事件，执行相应的状态转换。
+ *          使用状态转换表（switch-case嵌套）实现FSM逻辑。
+ *          
+ * @param event 触发事件
+ *        - START_MARKING: 开始标记（启动任务）
+ *        - MARKING_DONE: 标记完成
+ *        - START_MISSION: 开始任务
+ *        - REACHED_QR: 到达扫码区
+ *        - QR_SCANNED: 扫码完成
+ *        - REACHED_MATERIAL: 到达物料区
+ *        - MATERIAL_PICKED: 取料完成
+ *        - REACHED_PROCESS: 到达粗加工区
+ *        - MATERIAL_PLACED: 放料完成
+ *        - REACHED_BUFFER: 到达暂存区
+ *        - REACHED_START: 返回启停区
+ *        - CYCLE_START: 开始新循环
+ *        - ALL_DONE: 任务完成
+ *        - ERROR_OCCURRED: 异常发生
+ *        - EMERGENCY_STOP: 紧急停止
+ *        - RESET: 重置状态机
+ *        
+ * @return TaskState 转换后的新状态
+ *         
+ * @note 状态转换表（部分）：
+ *       | 当前状态           | 事件              | 新状态               |
+ *       |--------------------|-------------------|----------------------|
+ *       | IDLE               | START_MARKING     | MARKING              |
+ *       | MARKING            | MARKING_DONE      | READY                |
+ *       | READY              | START_MISSION     | MOVING_TO_QR         |
+ *       | MOVING_TO_QR       | REACHED_QR        | SCANNING_QR          |
+ *       | SCANNING_QR        | QR_SCANNED        | QR_DONE              |
+ *       | QR_DONE            | -                 | MOVING_TO_MATERIAL   |
+ *       | MOVING_TO_MATERIAL | REACHED_MATERIAL  | PICKING_MATERIAL     |
+ *       | PICKING_MATERIAL   | MATERIAL_PICKED   | MATERIAL_DONE        |
+ *       | MATERIAL_DONE      | -                 | MOVING_TO_PROCESS    |
+ *       | MOVING_TO_PROCESS  | REACHED_PROCESS   | PLACING_MATERIAL     |
+ *       | PLACING_MATERIAL   | MATERIAL_PLACED   | PROCESS_DONE         |
+ *       | PROCESS_DONE       | -                 | MOVING_TO_BUFFER     |
+ *       | MOVING_TO_BUFFER   | REACHED_BUFFER    | BUFFER_DONE          |
+ *       | BUFFER_DONE        | -                 | CYCLE_REPEAT/RETURNING|
+ *       | CYCLE_REPEAT       | CYCLE_START       | MOVING_TO_QR         |
+ *       | RETURNING          | REACHED_START     | COMPLETED            |
+ *       | 任意状态           | ERROR_OCCURRED    | ERROR                |
+ *       | 任意状态           | RESET             | IDLE                 |
+ *       
+ * @see transitionTo()
+ */
 TaskState TaskStateMachine::handleEvent(TaskEvent event)
 {
-    TaskState prevState = m_currentState;
-
+    // 状态转换表：根据当前状态和事件执行转换
     switch (m_currentState) {
     // ===== 空闲状态 =====
     case TaskState::IDLE:

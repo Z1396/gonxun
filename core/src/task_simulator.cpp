@@ -1,7 +1,47 @@
 /**
- * 任务仿真系统实现
+ * @file task_simulator.cpp
+ * @brief 任务仿真系统实现文件
+ * 
+ * @details 本文件实现了完整的任务仿真系统，用于验证任务流程和路径规划。
+ *          核心功能：
+ *          - 任务码解析：解析任务码并生成物料放置顺序
+ *          - 程序生成：生成机器人执行程序的指令序列
+ *          - 任务执行：模拟执行每条指令并记录结果
+ *          - 报告生成：生成详细的执行报告和统计数据
+ *          - 路径规划：集成 A* 算法规划移动路径
+ *          - 状态同步：与状态机同步，实时更新任务状态
+ * 
+ * @author 智能物流搬运系统开发团队
+ * @version 1.0
+ * @date 2025-01-01
+ * 
+ * @note 修改历史：
+ *       - 2025-01-01: 初始版本，实现基础仿真功能
+ *       - 2025-02-15: 增加详细报告生成
+ *       - 2025-03-30: 集成状态机和路径规划
+ *       
+ * @note 仿真流程：
+ *       1. 设置任务码：setTaskCode("312")
+ *       2. 设置障碍物：setObstacles(obstacles)
+ *       3. 生成程序：generateProgram()
+ *       4. 执行仿真：run() 或 step()
+ *       5. 获取报告：generateTextReport()
+ *       
+ * @note 任务码格式：
+ *       - 3位数字，每位为 1-3
+ *       - 示例："312" 表示物料放置顺序为 [3, 1, 2]
+ *       - 物料A（第1个取的）→ 放到 3号槽
+ *       - 物料B（第2个取的）→ 放到 1号槽
+ *       - 物料C（第3个取的）→ 放到 2号槽
+ *       
+ * @note 性能统计：
+ *       - 总步骤数：成功/失败步骤统计
+ *       - 路径总长：累计移动距离
+ *       - 执行时间：从开始到结束的总耗时
+ *       - 物料统计：取料/放料数量
+ *       
+ * @see task_simulator.hpp
  */
-
 #include "task_simulator.hpp"
 #include <iostream>
 #include <sstream>
@@ -13,18 +53,24 @@
 
 namespace gonxun {
 
+/**
+ * @brief 构造函数，初始化仿真系统
+ * 
+ * @details 设置默认参数，初始化状态机，并注册状态变化回调。
+ */
 TaskSimulator::TaskSimulator()
-    : m_taskCode("123")
-    , m_startPoint({2250, 150})
-    , m_totalCycles(2)
-    , m_speedMultiplier(1.0)
-    , m_currentStep(0)
-    , m_running(false)
+    : m_taskCode("123")           // 默认任务码
+    , m_startPoint({2250, 150})   // 默认起点（启停区）
+    , m_totalCycles(2)            // 默认循环次数
+    , m_speedMultiplier(1.0)      // 默认速度倍率
+    , m_currentStep(0)            // 当前步骤索引
+    , m_running(false)            // 运行标志
 {
+    // 初始化状态机
     m_stateMachine.setTotalCycles(m_totalCycles);
     m_stateMachine.setTotalMaterials(3);
 
-    // 状态机回调 → 转发到仿真器外部
+    // 注册状态变化回调（转发到外部）
     m_stateMachine.onStateChange([this](TaskState oldState, TaskState newState) {
         notifyStateChange(oldState, newState);
     });
@@ -82,16 +128,45 @@ void TaskSimulator::setObstacles(const std::vector<ObstacleRect>& obstacles)
     m_planner.setObstacles(obstacles);
 }
 
+/**
+ * @brief 生成机器人执行程序
+ * 
+ * @details 根据任务码生成完整的指令序列，包括移动、取料、放料、扫码等操作。
+ *          
+ * @return RobotProgram 指令序列列表
+ *         
+ * @note 程序结构：
+ *       每轮循环包含：
+ *       1. 前往扫码区
+ *       2. 扫描二维码
+ *       3. 循环取料-放料（3次）：
+ *          - 前往物料区
+ *          - 取料
+ *          - 前往粗加工区（根据任务码放置）
+ *          - 放料
+ *       4. 前往暂存区
+ *       5. 等待
+ *       6. 返回启停区
+ *       
+ * @note 任务码示例：
+ *       - 任务码 "312" → 放置顺序 [3, 1, 2]
+ *       - 物料1 → 粗加工区3号位
+ *       - 物料2 → 粗加工区1号位
+ *       - 物料3 → 粗加工区2号位
+ *       
+ * @see parseTaskCode()
+ */
 RobotProgram TaskSimulator::generateProgram()
 {
     RobotProgram program;
-    auto placementOrder = parseTaskCode();
+    auto placementOrder = parseTaskCode();  // 解析任务码
 
     int cycleCount = m_totalCycles;
     Point currentPos = m_startPoint;
 
+    // 循环执行每轮任务
     for (int cycle = 0; cycle < cycleCount; ++cycle) {
-        // ---- 阶段1: 前往扫码区 ----
+        // 阶段 1: 前往扫码区
         program.push_back({
             InstructionType::MOVE_TO,
             "第" + std::to_string(cycle + 1) + "轮: 前往扫码区",
@@ -99,15 +174,14 @@ RobotProgram TaskSimulator::generateProgram()
         });
         currentPos = m_field.qrZone;
 
-        // 扫码
+        // 扫描二维码
         program.push_back({
             InstructionType::SCAN_QR,
             "第" + std::to_string(cycle + 1) + "轮: 扫描二维码",
             {}, 0, 1000, 0, 0, 0
         });
 
-        // ---- 阶段2: 前往物料区取料 ----
-        // 每轮取3个物料，依次送到粗加工区
+        // 阶段 2: 前往物料区取料（每轮取3个物料）
         for (int mat = 0; mat < 3; ++mat) {
             // 前往物料区
             program.push_back({
@@ -126,7 +200,7 @@ RobotProgram TaskSimulator::generateProgram()
                 {}, 0, 500, mat + 1, 0, 0
             });
 
-            // 前往粗加工区对应槽位
+            // 前往粗加工区对应槽位（根据任务码）
             int slot = placementOrder[mat] - 1;  // 0-indexed
             program.push_back({
                 InstructionType::MOVE_TO,
@@ -145,7 +219,7 @@ RobotProgram TaskSimulator::generateProgram()
             });
         }
 
-        // ---- 阶段3: 前往暂存区 ----
+        // 阶段 3: 前往暂存区
         int bufferSlot = cycle % 3;
         program.push_back({
             InstructionType::MOVE_TO,
@@ -162,7 +236,7 @@ RobotProgram TaskSimulator::generateProgram()
         });
     }
 
-    // ---- 阶段4: 返回启停区 ----
+    // 阶段 4: 返回启停区
     program.push_back({
         InstructionType::MOVE_TO,
         "返回启停区",
@@ -177,6 +251,7 @@ RobotProgram TaskSimulator::generateProgram()
 
     m_program = program;
 
+    // 输出程序摘要
     std::cout << "[Simulator] 程序已生成，共 " << program.size() << " 条指令" << std::endl;
     for (size_t i = 0; i < program.size(); ++i) {
         std::cout << "  [" << (i + 1) << "] " << program[i].description << std::endl;

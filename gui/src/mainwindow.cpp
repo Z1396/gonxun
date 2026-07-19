@@ -130,7 +130,15 @@ MainWindow::MainWindow(QWidget *parent)
     m_simBtn->setCheckable(true);
     m_simBtn->setStyleSheet(buttonStyle("#8e44ad", "#7d3c98", "#c0392b"));
 
-    // ==================== 5. 状态提示标签 ====================
+    // ==================== 5. 路径预览按钮 ====================
+    // 功能：生成并显示完整任务流程路径
+    // 样式：橙色正常，深橙悬停，无选中状态
+    m_pathPreviewBtn = new QPushButton("路径预览", central);
+    m_pathPreviewBtn->setMinimumHeight(36);
+    m_pathPreviewBtn->setCheckable(false);
+    m_pathPreviewBtn->setStyleSheet(buttonStyle("#e67e22", "#d35400", "#d35400"));
+
+    // ==================== 6. 状态提示标签 ====================
     m_statusLabel = new QLabel(central);
     m_statusLabel->setFont(QFont("Microsoft YaHei", 10));
 
@@ -138,6 +146,7 @@ MainWindow::MainWindow(QWidget *parent)
     toolbar->addWidget(m_markBtn);
     toolbar->addWidget(m_selectStartBtn);
     toolbar->addWidget(m_simBtn);
+    toolbar->addWidget(m_pathPreviewBtn);
     toolbar->addWidget(m_statusLabel);
     toolbar->addStretch();
 
@@ -168,6 +177,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_markBtn, &QPushButton::clicked, this, &MainWindow::onMarkButtonClicked);
     connect(m_selectStartBtn, &QPushButton::clicked, this, &MainWindow::onSelectStartZoneClicked);
     connect(m_simBtn, &QPushButton::clicked, this, &MainWindow::onSimButtonClicked);
+    connect(m_pathPreviewBtn, &QPushButton::clicked, this, &MainWindow::onPathPreviewClicked);
     connect(m_courtMap, &CourtMapWidget::obstacleToggled, this, &MainWindow::onObstacleToggled);
     connect(m_courtMap, &CourtMapWidget::startZoneSelected, this, &MainWindow::onStartZoneSelected);
     connect(m_simController, &SimulationController::logMessage, this, &MainWindow::onSimLog);
@@ -309,4 +319,38 @@ void MainWindow::onSimLog(const QString& msg)
     // 将日志显示在状态栏
     m_statusLabel->setText(msg);
     m_statusLabel->setStyleSheet("color: #8e44ad; font-weight: bold;");
+}
+
+void MainWindow::onPathPreviewClicked()
+{
+    // ===== 检查是否选择了启停区 =====
+    int startZone = m_courtMap->selectedStartZone();
+    if (startZone < 0) {
+        m_statusLabel->setText("请先选择启停区（右上角或右下角）");
+        m_statusLabel->setStyleSheet("color: #e74c3c; font-weight: bold;");
+        return;
+    }
+    
+    // ===== 生成完整任务路径 =====
+    QString taskCode = "312";  // 默认任务码
+    QVector<QPointF> fullPath = m_courtMap->generateFullMissionPath(startZone, taskCode);
+    
+    // ===== 显示路径在地图上 =====
+    m_courtMap->setPath(fullPath);
+    
+    // ===== 更新状态提示 =====
+    QString zoneName = m_courtMap->selectedStartZoneName();
+    QString pos = (startZone == 0) ? "右上角" : "右下角";
+    m_statusLabel->setText(QString("路径预览: %1 (%2) → 二维码 → 原料 → 粗加工 → 暂存 → 返回 | 总路径点: %3个")
+                          .arg(zoneName, pos).arg(fullPath.size()));
+    m_statusLabel->setStyleSheet("color: #e67e22; font-weight: bold;");
+    
+    // ===== 更新数据面板 =====
+    if (m_dataPanel) {
+        QPointF robotPos = fullPath.first();
+        m_dataPanel->updateRobotPose(static_cast<int>(robotPos.x()), 
+                                     static_cast<int>(robotPos.y()), 
+                                     0.0);
+        m_dataPanel->updateTaskState("路径预览");
+    }
 }

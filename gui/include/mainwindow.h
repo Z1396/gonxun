@@ -48,6 +48,8 @@ private slots:
     void onSimButtonClicked();
     // 仿真日志
     void onSimLog(const QString& msg);
+    // 路径预览按钮点击槽函数
+    void onPathPreviewClicked();
 
 private:
     void updateStatus();
@@ -60,6 +62,7 @@ private:
     QPushButton *m_selectStartBtn = nullptr;
     QPushButton *m_startBtn = nullptr;      // 开始/停止按钮
     QPushButton *m_simBtn = nullptr;        // 仿真按钮
+    QPushButton *m_pathPreviewBtn = nullptr; // 路径预览按钮
     QLabel *m_statusLabel = nullptr;
     bool m_visionRunning = false;            // 视觉系统运行状态
 };

@@ -251,19 +251,21 @@ public:
     // ========================================================================
     // 路径规划接口
     // ========================================================================
-    
+
     /**
      * @brief 规划从起点到终点的最优路径
-     * 
+     *
      * 使用 A* 算法在栅格地图上搜索最短路径，避开所有障碍物。
-     * 
+     *
      * @param start 起点（毫米坐标）
      * @param goal 终点（毫米坐标）
-     * 
+     * @param allowStartZone 是否允许经过启停区（默认 false）
+     *                        只有最后返回启停区时才设为 true
+     *
      * @return 路径点数组（毫米坐标）
      *         - 非空数组：规划成功，包含从起点到终点的路径点序列
      *         - 空数组：规划失败（无可行路径、起点/终点无效等）
-     * 
+     *
      * @par 算法流程：
      *      1. 将起点和终点转换为栅格坐标
      *      2. 边界检查和障碍物检查
@@ -275,19 +277,19 @@ public:
      *         - 更新 gScore 和 cameFrom 映射
      *      5. 到达终点后，回溯重建路径
      *      6. 进行路径简化，去除冗余拐点
-     * 
+     *
      * @par 性能说明：
      *      - 平均规划时间：2-5ms（普通路径）
      *      - 最坏情况：约 2300 次节点扩展（场地对角线）
      *      - 路径简化后平均点数：10-20 个（原始路径可能 100+ 个）
-     * 
+     *
      * @par 异常情况处理：
      *      - 起点/终点越界：返回空路径，输出错误日志
      *      - 终点在障碍物内：返回空路径，输出错误日志
      *      - 起点在障碍物内：自动搜索最近可行点，最大搜索半径 200mm
      *      - 无可行路径：返回空路径，输出错误日志
      */
-    Path plan(const Point& start, const Point& goal);
+    Path plan(const Point& start, const Point& goal, bool allowStartZone = false);
     
     // ========================================================================
     // 辅助查询接口
@@ -371,7 +373,38 @@ private:
      * @return 曼哈顿距离 × 10（为了与实际代价统一量级）
      */
     int heuristic(const Point& a, const Point& b) const;
-    
+
+    /**
+     * @brief 检查机器人边界是否与障碍物碰撞
+     *
+     * 实时碰撞检测：
+     * 1. 将机器人中心点坐标转换为毫米坐标
+     * 2. 计算机器人边界（中心±150mm）
+     * 3. 检查机器人边界是否与障碍物有交集
+     *
+     * @param gridX 机器人中心栅格坐标X
+     * @param gridY 机器人中心栅格坐标Y
+     * @param allowStartZone 是否允许进入启停区
+     *
+     * @return true=有碰撞，false=无碰撞
+     */
+    bool checkCollision(int gridX, int gridY, bool allowStartZone) const;
+
+    /**
+     * @brief 检查机器人边界是否与单个障碍物碰撞
+     *
+     * @param robotMinX 机器人最小X坐标（毫米）
+     * @param robotMaxX 机器人最大X坐标（毫米）
+     * @param robotMinY 机器人最小Y坐标（毫米）
+     * @param robotMaxY 机器人最大Y坐标（毫米）
+     * @param obs 障碍物矩形
+     *
+     * @return true=有碰撞，false=无碰撞
+     */
+    bool checkObstacleCollision(int robotMinX, int robotMaxX,
+                                int robotMinY, int robotMaxY,
+                                const ObstacleRect& obs) const;
+
     /**
      * @brief 获取邻居节点
      * 
@@ -430,15 +463,27 @@ private:
      * @note 索引顺序为 [x][y]，对应栅格坐标。
      *       数组在构造时初始化，大小固定，不动态扩容。
      */
-    std::vector<std::vector<bool>> m_gridMap;
-    
+    std::vector<std::vector<bool>> m_gridMap;      // 栅格地图（用户标记障碍物）
+
     /**
-     * @brief 障碍物列表
-     * 
+     * @brief 用户标记障碍物列表
+     *
      * 存储所有动态标记的障碍物（不包括静态黄色区域）。
      * 用于序列化和调试输出。
      */
     std::vector<ObstacleRect> m_obstacles;
+
+    /**
+     * @brief 固定障碍物列表
+     *
+     * 存储场地固有障碍物：
+     * - 4块黄色格子（450×450mm）
+     * - 暂存区（左侧，3个圆形区域）
+     * - 粗加工区（底部，3个圆形区域）
+     *
+     * 不膨胀，在碰撞检测时考虑机器人尺寸。
+     */
+    std::vector<ObstacleRect> m_fixedObstacles;
 };
 
 } // namespace gonxun

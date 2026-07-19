@@ -184,8 +184,9 @@ QVector<SimulationController::NavTarget> SimulationController::buildNavSequence(
         // 前往二维码区（右侧）
         seq.append({"前往扫码区", {2360, 1200}, "前往扫码区"});
 
-        // 前往原料区（顶部中心）
-        seq.append({"前往原料区", {1200, 50}, "前往原料区"});
+        // 前往原料区（使用格子中心坐标，避免靠近边界）
+        // 格子(2, 0)中心：(1200, 275)
+        seq.append({"前往原料区", {1200, 275}, "前往原料区"});
 
         // 粗加工区有3个槽位，根据任务码决定顺序
         auto order = [this]() -> QVector<int> {
@@ -202,7 +203,7 @@ QVector<SimulationController::NavTarget> SimulationController::buildNavSequence(
                        {1050 + slot * 150, 2325}, "前往粗加工区"});
             // 每次放完需要回原料区取下一个
             if (i < 2) {
-                seq.append({"前往原料区", {1200, 50}, "前往原料区"});
+                seq.append({"前往原料区", {1200, 275}, "前往原料区"});
             }
         }
 
@@ -240,26 +241,89 @@ void SimulationController::planCurrentSegment()
     const NavTarget& target = m_navSequence[m_currentSegment];
 
     QPointF currentPos = m_mapWidget->robotPos();
-    gonxun::Point start{static_cast<int>(currentPos.x()), static_cast<int>(currentPos.y())};
-    gonxun::Point goal{target.pos.x, target.pos.y};
+
+    // ========== 改用格子批量路径（方案1）==========
+    // 核心原则：
+    // 1. 不使用A*精确路径（避免微调）
+    // 2. 使用格子批量路径（只有起点、转向点、终点）
+    // 3. 机器人只需进入格子区域，不需要精确到达中心
 
     m_segmentTimer.start();
 
-    m_currentPath = m_planner.plan(start, goal);
+    // 步骤1：将毫米坐标转换为格子坐标（使用GUI的真实格子定义）
+    auto currentCell = m_mapWidget->fieldToGrid5(static_cast<int>(currentPos.x()),
+                                                   static_cast<int>(currentPos.y()));
+    auto targetCell = m_mapWidget->fieldToGrid5(target.pos.x, target.pos.y);
 
-    if (m_currentPath.empty()) {
-        m_phase = SimPhase::ERROR;
-        m_stateMachine.handleEvent(gonxun::TaskEvent::ERROR_OCCURRED);
-        emit phaseChanged(m_phase, "路径规划失败");
-        stop();
+    int currentGridX = currentCell.gridX;
+    int currentGridY = currentCell.gridY;
+    int targetGridX = targetCell.gridX;
+    int targetGridY = targetCell.gridY;
+
+    // 检查是否已经在目标格子内
+    if (currentGridX == targetGridX && currentGridY == targetGridY) {
+        // 已经在目标格子内，直接标记为完成
+        onSegmentComplete();
         return;
     }
 
-    QVector<QPointF> pathPts;
-    for (const auto& p : m_currentPath) {
-        pathPts.append(QPointF(p.x, p.y));
+    // 步骤2：生成格子批量路径（只有起点、转向点、终点）
+    int currentAngle = 0;  // TODO: 从机器人状态获取实际朝向
+    QVector<QPointF> gridPath = m_mapWidget->generateBatchMovePath(
+        currentGridX, currentGridY,
+        targetGridX, targetGridY,
+        currentAngle
+    );
+
+    // 步骤3：将格子路径转换为gonxun::Path格式
+    m_currentPath.clear();
+    for (const QPointF& pt : gridPath) {
+        m_currentPath.push_back({static_cast<int>(pt.x()), static_cast<int>(pt.y())});
     }
-    m_mapWidget->setPath(pathPts);
+
+    if (m_currentPath.empty()) {
+        // ========== 格子路径受阻，回退到A*算法绕行 ==========
+        emitLog(QString("[调试] 格子路径受阻，尝试A*绕行: (%1,%2) → (%3,%4)")
+                .arg(currentGridX).arg(currentGridY)
+                .arg(targetGridX).arg(targetGridY));
+
+        // 步骤A：将障碍物传递给A*规划器
+        updateObstaclesFromMap();
+
+        // 步骤B：判断是否允许经过启停区
+        // 只有在最后返回启停区时才允许
+        bool allowStartZone = target.name.contains("启停区");
+
+        // 步骤C：使用A*算法规划绕行路径
+        gonxun::Point astarStart{static_cast<int>(currentPos.x()), static_cast<int>(currentPos.y())};
+        gonxun::Point astarGoal{target.pos.x, target.pos.y};
+
+        m_currentPath = m_planner.plan(astarStart, astarGoal, allowStartZone);
+
+        if (!m_currentPath.empty()) {
+            emitLog(QString("[调试] A*绕行成功，路径点数: %1").arg(m_currentPath.size()));
+        } else {
+            emitLog(QString("[调试] A*绕行失败，路径被完全阻断"));
+        }
+
+        if (m_currentPath.empty()) {
+            // A*也找不到路径，真的无路可走
+            m_phase = SimPhase::ERROR;
+            m_stateMachine.handleEvent(gonxun::TaskEvent::ERROR_OCCURRED);
+            emit phaseChanged(m_phase, QString("无法到达: %1（路径被完全阻断）").arg(target.name));
+            stop();
+            return;
+        }
+
+        // 步骤D：将A*路径转换为GUI显示格式
+        gridPath.clear();
+        for (const auto& pt : m_currentPath) {
+            gridPath.append(QPointF(pt.x, pt.y));
+        }
+    }
+
+    // 步骤4：设置路径可视化（GUI显示）
+    m_mapWidget->setPath(gridPath);
 
     startMoving();
 }

@@ -48,6 +48,17 @@ struct ObstacleRect {
 };
 
 /**
+ * @brief 5×5网格格子结构体
+ * @desc 手动定义的网格格子，用于简化路径规划
+ */
+struct Grid5Cell {
+    int id;              // 格子唯一编号（0-24，从左上角开始，逐行编号）
+    int gridX;           // 网格X坐标（0-4，从右到左）
+    int gridY;           // 网格Y坐标（0-4，从上到下）
+    QRectF rect;         // 格子在场地中的矩形范围（毫米）
+};
+
+/**
  * @brief CourtMapWidget 赛场地图绘制控件
  * @功能：
  * 1、完整绘制比赛场地 2400*2400 标准场地
@@ -121,6 +132,63 @@ public:
     void setPath(const QVector<QPointF> &points);
     void clearPath() { m_pathPoints.clear(); update(); }
 
+    /**
+     * @brief 生成完整任务路径（从启停区到各区域的完整流程）
+     * @param startZoneIndex 启停区索引（0=右上角，1=右下角）
+     * @param taskCode 任务码（例如"312"）
+     * @return 完整路径点数组（场地坐标）
+     */
+    QVector<QPointF> generateFullMissionPath(int startZoneIndex, const QString& taskCode) const;
+    
+    /**
+     * @brief 批量移动命令结构体
+     * @details 用于描述机器人的批量移动指令
+     */
+    struct BatchMoveCommand {
+        int targetGridX;        // 目标格子X坐标（0-4）
+        int targetGridY;        // 目标格子Y坐标（0-4）
+        int turnAngle;          // 转向角度（0/90/180/270）
+        int moveCount;          // 移动格数
+        std::string direction;  // 移动方向描述
+    };
+    
+    /**
+     * @brief 生成批量移动路径（真实坐标）
+     * @param startGridX 起点格子X坐标（0-4）
+     * @param startGridY 起点格子Y坐标（0-4）
+     * @param goalGridX 终点格子X坐标（0-4）
+     * @param goalGridY 终点格子Y坐标（0-4）
+     * @param currentAngle 当前陀螺仪角度（0/90/180/270）
+     * @return 真实坐标路径点数组（毫米）
+     */
+    QVector<QPointF> generateBatchMovePath(int startGridX, int startGridY, 
+                                            int goalGridX, int goalGridY,
+                                            int currentAngle) const;
+    
+    /**
+     * @brief 检测格子内是否有障碍物
+     * @param gridX 格子X坐标（0-4）
+     * @param gridY 格子Y坐标（0-4）
+     * @return true=有障碍物，false=无障碍物
+     */
+    bool hasObstacleInCell(int gridX, int gridY) const;
+    
+    /**
+     * @brief 获取格子的中心点坐标
+     * @param gridX 格子X坐标（0-4）
+     * @param gridY 格子Y坐标（0-4）
+     * @return 真实坐标（毫米）
+     */
+    QPointF getCellCenter(int gridX, int gridY) const;
+
+    /**
+     * @brief 将毫米坐标转换为格子坐标（5×5网格）
+     * @param x 毫米坐标X
+     * @param y 毫米坐标Y
+     * @return 格子坐标（gridX, gridY都在0-4范围内）
+     */
+    Grid5Cell fieldToGrid5(int x, int y) const;
+
 signals:
     /**
      * @brief 障碍物标记状态改变信号
@@ -156,6 +224,8 @@ private:
     void initMapData();
     // 初始化所有障碍物方块数据
     void initObstacles();
+    // 初始化5×5网格格子数据（手动定义坐标）
+    void initGrid5();
 
     // 绘制场地背景
     void drawBackground(QPainter &p);
@@ -191,6 +261,8 @@ private:
     // 绘制同心圆通用方法（缓冲区、中心环复用）
     void drawConcentricCircle(QPainter &p, const QPointF &center, qreal outerR, qreal innerR,
                               const QColor &outerColor, const QColor &innerColor);
+    // 绘制5×5网格线
+    void drawGrid5(QPainter &p);
 
     /**
      * @brief 坐标转换：真实场地坐标 → 窗口像素坐标
@@ -223,6 +295,7 @@ private:
     QVector<CourtCircle> m_bufferCircles; // 缓冲区圆环数据
     QVector<CourtCircle> m_processCircles;// 加工区圆环数据
     QVector<ObstacleRect> m_obstacles;    // 所有障碍物数据
+    QVector<Grid5Cell> m_grid5Cells;      // 5×5网格格子数据（25个格子）
 
     bool m_markMode = false;              // 障碍物标记模式开关
     bool m_startZoneSelectable = false;   // 起点选择模式开关

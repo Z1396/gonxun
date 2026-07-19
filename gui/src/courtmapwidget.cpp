@@ -75,6 +75,8 @@ CourtMapWidget::CourtMapWidget(QWidget *parent)
     initMapData();
     // 初始化所有障碍物矩形数据
     initObstacles();
+    // 初始化5×5网格格子数据
+    initGrid5();
 }
 
 /**
@@ -126,10 +128,10 @@ void CourtMapWidget::initObstacles()
     // 场地内所有障碍物的世界坐标矩形数组
     QRectF rects[] = {
         { 0, 0, 550, 550},     { 550,  0, 450, 550},                           {1400,  0, 450, 550},
-        { 0,  550, 550, 450},                          {1000,  550, 400, 450},                        {1850,  550, 550, 450},
+        { 0,  550, 550, 360},                          {1000,  550, 400, 450},                        {1850,  550, 550, 450},
                               { 550, 1000, 450, 400}, {1000, 1000, 400, 400}, {1400, 1000, 450, 400},
-        { 0, 1400, 550, 450},                         {1000, 1400, 400, 450},                        {1850, 1400, 550, 450},
-        { 0, 1850, 550, 550}, { 550, 1850, 450, 400},                         {1400, 1850, 450, 400}
+        { 0, 1490, 550, 360},                         {1000, 1400, 400, 450},                        {1850, 1400, 550, 450},
+        { 0, 1850, 550, 550}, { 550, 1850, 360, 550},                         {1490, 1850, 360, 550}
     };
 
     m_obstacles.clear();
@@ -137,6 +139,68 @@ void CourtMapWidget::initObstacles()
     for (int i = 0; i < 15; ++i) {
         m_obstacles.append({i, rects[i], false});
     }
+}
+
+/**
+ * @brief 初始化5×5网格格子数据（手动定义坐标）
+ * 
+ * @details 手动定义25个格子的坐标范围，用于路径规划和可视化。
+ *          网格坐标系统：
+ *          - X轴：0-4（从右到左，0=右边界，4=左边界）
+ *          - Y轴：0-4（从上到下，0=上边界，4=下边界）
+ *          
+ *          格子编号规则：
+ *          - 从左上角开始，逐行编号（0-24）
+ *          - 第0行：(0,0), (1,0), (2,0), (3,0), (4,0)
+ *          - 第1行：(0,1), (1,1), (2,1), (3,1), (4,1)
+ *          - ...
+ *          - 第4行：(0,4), (1,4), (2,4), (3,4), (4,4)
+ *          
+ * @note 坐标定义参考场地区域布局和障碍物分布
+ */
+void CourtMapWidget::initGrid5()
+{
+    m_grid5Cells.clear();
+    
+    // ===== 手动定义25个格子的坐标（毫米） =====
+    // 每个格子的 QRectF(x, y, width, height)
+    // x: 左上角X坐标
+    // y: 左上角Y坐标
+    // width: 宽度
+    // height: 高度
+    
+    // 第0行（Y=0，顶部）
+    m_grid5Cells.append({0, 4, 0, QRectF(0, 0, 550, 550)});      // 格子0：(4,0) 左上角
+    m_grid5Cells.append({1, 3, 0, QRectF(550, 0, 450, 550)});    // 格子1：(3,0)
+    m_grid5Cells.append({2, 2, 0, QRectF(1000, 0, 400, 550)});    // 格子2：(2,0)
+    m_grid5Cells.append({3, 1, 0, QRectF(1400, 0, 450, 550)});   // 格子3：(1,0)
+    m_grid5Cells.append({4, 0, 0, QRectF(1850, 0, 550, 550)});   // 格子4：(0,0) 右上角
+    
+    // 第1行（Y=1）
+    m_grid5Cells.append({5, 4, 1, QRectF(0, 550, 550, 360)});    // 格子5：(4,1)
+    m_grid5Cells.append({6, 3, 1, QRectF(550, 550, 450, 450)});  // 格子6：(3,1)
+    m_grid5Cells.append({7, 2, 1, QRectF(1000, 550, 400, 450)});  // 格子7：(2,1)
+    m_grid5Cells.append({8, 1, 1, QRectF(1400, 550, 450, 450)}); // 格子8：(1,1)
+    m_grid5Cells.append({9, 0, 1, QRectF(1850, 550, 550, 450)}); // 格子9：(0,1)
+    // 第2行（Y=2，中间）
+    m_grid5Cells.append({10, 4, 2, QRectF(0, 910, 550, 580)});   // 格子10：(4,2)
+    m_grid5Cells.append({11, 3, 2, QRectF(550, 1000, 450, 400)}); // 格子11：(3,2)
+    m_grid5Cells.append({12, 2, 2, QRectF(1000, 1000, 400, 400)}); // 格子12：(2,2) 中心
+    m_grid5Cells.append({13, 1, 2, QRectF(1400, 1000, 450, 400)});// 格子13：(1,2)
+    m_grid5Cells.append({14, 0, 2, QRectF(1850, 960, 550, 440)});// 格子14：(0,2)
+    
+    // 第3行（Y=3）
+    m_grid5Cells.append({15, 4, 3, QRectF(0, 1490, 550, 360)});  // 格子15：(4,3)
+    m_grid5Cells.append({16, 3, 3, QRectF(550, 1400, 450, 450)});// 格子16：(3,3)
+    m_grid5Cells.append({17, 2, 3, QRectF(1000, 1400, 400, 450)});// 格子17：(2,3)
+    m_grid5Cells.append({18, 1, 3, QRectF(1400, 1400, 450, 450)});// 格子18：(1,3)
+    m_grid5Cells.append({19, 0, 3, QRectF(1850, 1400, 550, 450)});// 格子19：(0,3)
+    // 第4行（Y=4，底部）
+    m_grid5Cells.append({20, 4, 4, QRectF(0, 1850, 550, 550)});  // 格子20：(4,4) 左下角
+    m_grid5Cells.append({21, 3, 4, QRectF(550, 1850, 360, 550)});// 格子21：(3,4)
+    m_grid5Cells.append({22, 2, 4, QRectF(910, 1850, 580, 550)});// 格子22：(2,4)
+    m_grid5Cells.append({23, 1, 4, QRectF(1490, 1850, 360, 550)});// 格子23：(1,4)
+    m_grid5Cells.append({24, 0, 4, QRectF(1850, 1850, 550, 550)});// 格子24：(0,4) 右下角
 }
 
 // 切换标记模式：开启后点击障碍物可红标标记
@@ -212,6 +276,7 @@ void CourtMapWidget::paintEvent(QPaintEvent *event)
     // 分层绘制：由底层到上层，顺序不能乱（上层覆盖下层）
     drawBackground(p);        // 背景底色
     drawOuterFrame(p);        // 场地外边框
+    drawGrid5(p);             // 5×5网格线（新增）
     drawCenterBlocks(p);     // 中心四块方块障碍
     drawCenterCross(p);       // 中心十字虚线坐标轴
     drawRawMaterialArea(p);   // 原料渐变圆形区域
@@ -732,4 +797,292 @@ void CourtMapWidget::drawPath(QPainter &p)
     }
 
     p.restore();
-}// 测试增量编译
+}
+
+/**
+ * @brief 生成完整任务路径
+ * 
+ * @details 生成从启停区到各区域的完整任务流程路径。
+ *          任务流程：启停区 → 二维码区 → 原料区 → 粗加工区 → 暂存区 → 启停区
+ *          
+ *          路径生成策略：
+ *          1. 使用简化的点对点连接（直线）
+ *          2. 后续可集成A*算法避开障碍物
+ *          
+ * @param startZoneIndex 启停区索引（0=右上角，1=右下角）
+ * @param taskCode 任务码（例如"312"）
+ * @return 完整路径点数组（场地坐标）
+ */
+QVector<QPointF> CourtMapWidget::generateFullMissionPath(int startZoneIndex, const QString& taskCode) const
+{
+    QVector<QPointF> fullPath;
+    
+    // ===== 场地各区域对应的格子坐标（5×5网格） =====
+    // 注意：格子坐标(0,0)是右上角启停区1
+    struct GridLocations {
+        int startZone1[2] = {0, 0};        // 启停区1：格子(0,0)
+        int startZone2[2] = {0, 4};        // 启停区2：格子(0,4)
+        int qrZone[2] = {0, 2};            // 二维码区：格子(0,2)
+        int materialZone[2] = {2, 0};      // 原料区：格子(2,0)
+        int processSlots[3][2] = {         // 粗加工区：格子(1,4), (2,4), (3,4)
+            {1, 4}, {2, 4}, {3, 4}
+        };
+        int bufferSlots[3][2] = {          // 暂存区：格子(4,1), (4,2), (4,3)
+            {4, 1}, {4, 2}, {4, 3}
+        };
+    };
+    
+    GridLocations grid;
+    
+    // ===== 1. 起点：根据启停区索引选择 =====
+    int startX = (startZoneIndex == 0) ? grid.startZone1[0] : grid.startZone2[0];
+    int startY = (startZoneIndex == 0) ? grid.startZone1[1] : grid.startZone2[1];
+    
+    int currentX = startX;
+    int currentY = startY;
+    int currentAngle = 0;  // 初始朝向：向左（0°）
+    
+    // ===== 2. 前往二维码区 =====
+    QVector<QPointF> path1 = generateBatchMovePath(currentX, currentY, grid.qrZone[0], grid.qrZone[1], currentAngle);
+    fullPath.append(path1);
+    currentX = grid.qrZone[0];
+    currentY = grid.qrZone[1];
+    // 计算当前朝向（根据最后一步移动）
+    if (!path1.isEmpty()) {
+        // 更新currentAngle（简化：假设X方向移动后朝向0°，Y方向移动后朝向90°）
+        // TODO: 根据实际移动方向更新
+    }
+    
+    // ===== 3. 前往原料区 =====
+    QVector<QPointF> path2 = generateBatchMovePath(currentX, currentY, grid.materialZone[0], grid.materialZone[1], currentAngle);
+    fullPath.append(path2);
+    currentX = grid.materialZone[0];
+    currentY = grid.materialZone[1];
+    
+    // ===== 4. 前往粗加工区（根据任务码） =====
+    if (taskCode.length() >= 3) {
+        for (int i = 0; i < 3; ++i) {
+            int slotIndex = taskCode[i].digitValue() - 1;  // 转为0-indexed
+            if (slotIndex >= 0 && slotIndex < 3) {
+                // 先回原料区
+                QVector<QPointF> pathBack = generateBatchMovePath(currentX, currentY, grid.materialZone[0], grid.materialZone[1], currentAngle);
+                fullPath.append(pathBack);
+                currentX = grid.materialZone[0];
+                currentY = grid.materialZone[1];
+                
+                // 再去粗加工区
+                QVector<QPointF> pathToProcess = generateBatchMovePath(currentX, currentY, grid.processSlots[slotIndex][0], grid.processSlots[slotIndex][1], currentAngle);
+                fullPath.append(pathToProcess);
+                currentX = grid.processSlots[slotIndex][0];
+                currentY = grid.processSlots[slotIndex][1];
+            }
+        }
+    }
+    
+    // ===== 5. 前往暂存区 =====
+    QVector<QPointF> pathToBuffer = generateBatchMovePath(currentX, currentY, grid.bufferSlots[0][0], grid.bufferSlots[0][1], currentAngle);
+    fullPath.append(pathToBuffer);
+    currentX = grid.bufferSlots[0][0];
+    currentY = grid.bufferSlots[0][1];
+    
+    // ===== 6. 返回启停区 =====
+    QVector<QPointF> pathToStart = generateBatchMovePath(currentX, currentY, startX, startY, currentAngle);
+    fullPath.append(pathToStart);
+    
+    return fullPath;
+}
+
+/**
+ * @brief 生成批量移动路径（真实坐标）
+ * 
+ * @details 核心原则：
+ *          1. 从一个格子中心到另一个格子中心，直线移动
+ *          2. 先X方向移动（逐格），再Y方向移动（逐格）
+ *          3. 只有在需要转向时才改变朝向
+ *          4. 每个格子中心都是路径点
+ *          
+ * @param startGridX 起点格子X坐标（0-4）
+ * @param startGridY 起点格子Y坐标（0-4）
+ * @param goalGridX 终点格子X坐标（0-4）
+ * @param goalGridY 终点格子Y坐标（0-4）
+ * @param currentAngle 当前陀螺仪角度（0/90/180/270）
+ * @return 真实坐标路径点数组（毫米）
+ */
+QVector<QPointF> CourtMapWidget::generateBatchMovePath(int startGridX, int startGridY,
+                                                        int goalGridX, int goalGridY,
+                                                        int currentAngle) const
+{
+    QVector<QPointF> pathPoints;
+    
+    // 计算移动向量
+    int dx = goalGridX - startGridX;  // X方向格数
+    int dy = goalGridY - startGridY;  // Y方向格数
+
+    // ========== 方案1：批量移动（只添加起点、转向点、终点）==========
+    // 核心原则：
+    // 1. GUI显示格子中心作为路径点（可视化清晰）
+    // 2. 机器人只需进入格子区域，不需要精确到达中心
+    // 3. 不需要在格子里面微调
+    // 4. 只在需要转向时添加路径点
+    // 5. 检查路径上是否有障碍物
+
+    // 步骤1：添加起点
+    pathPoints.append(getCellCenter(startGridX, startGridY));
+
+    // 步骤2：检查X方向路径上的障碍物
+    if (dx != 0) {
+        int direction = (dx > 0) ? 1 : -1;
+        for (int x = startGridX + direction; x != goalGridX + direction; x += direction) {
+            if (hasObstacleInCell(x, startGridY)) {
+                // X方向有障碍物，返回空路径
+                // TODO: 应该调用A*算法绕过障碍物
+                return QVector<QPointF>();
+            }
+        }
+        // X方向终点：(goalGridX, startGridY)
+        pathPoints.append(getCellCenter(goalGridX, startGridY));
+    }
+
+    // 步骤3：检查Y方向路径上的障碍物
+    if (dy != 0) {
+        int direction = (dy > 0) ? 1 : -1;
+        for (int y = startGridY + direction; y != goalGridY + direction; y += direction) {
+            if (hasObstacleInCell(goalGridX, y)) {
+                // Y方向有障碍物，返回空路径
+                // TODO: 应该调用A*算法绕过障碍物
+                return QVector<QPointF>();
+            }
+        }
+        // Y方向终点：(goalGridX, goalGridY)
+        pathPoints.append(getCellCenter(goalGridX, goalGridY));
+    }
+
+    return pathPoints;
+}
+
+/**
+ * @brief 检测格子内是否有障碍物
+ * 
+ * @details 检查指定格子内是否有已标记的障碍物
+ *          用于按需触发A*算法
+ *          
+ * @param gridX 格子X坐标（0-4）
+ * @param gridY 格子Y坐标（0-4）
+ * @return true=有障碍物，false=无障碍物
+ */
+bool CourtMapWidget::hasObstacleInCell(int gridX, int gridY) const
+{
+    // 查找对应的格子
+    for (const auto& cell : m_grid5Cells) {
+        if (cell.gridX == gridX && cell.gridY == gridY) {
+            // 检查格子的矩形范围内是否有已标记的障碍物
+            for (const auto& obstacle : m_obstacles) {
+                if (obstacle.isMarked) {
+                    // 检查障碍物是否与格子有交集（而不是完全包含）
+                    if (cell.rect.intersects(obstacle.rect)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+    }
+    return false;
+}
+
+/**
+ * @brief 获取格子的中心点坐标
+ * 
+ * @details 根据网格坐标计算真实场地坐标（毫米）
+ *          
+ * @param gridX 格子X坐标（0-4）
+ * @param gridY 格子Y坐标（0-4）
+ * @return 真实坐标（毫米）
+ */
+QPointF CourtMapWidget::getCellCenter(int gridX, int gridY) const
+{
+    // 查找对应的格子
+    for (const auto& cell : m_grid5Cells) {
+        if (cell.gridX == gridX && cell.gridY == gridY) {
+            // 返回格子中心点
+            return cell.rect.center();
+        }
+    }
+    
+    // 默认返回场地中心
+    return QPointF(1200, 1200);
+}
+
+Grid5Cell CourtMapWidget::fieldToGrid5(int x, int y) const
+{
+    // 遍历所有格子，查找包含该点的格子
+    for (const auto& cell : m_grid5Cells) {
+        if (cell.rect.contains(x, y)) {
+            return cell;  // 直接返回找到的格子
+        }
+    }
+    
+    // 如果点不在任何格子内，返回最近的格子
+    Grid5Cell nearest = m_grid5Cells[12];  // 默认中心格子
+    qreal minDist = 1e10;
+    
+    for (const auto& cell : m_grid5Cells) {
+        QPointF center = cell.rect.center();
+        qreal dx = x - center.x();
+        qreal dy = y - center.y();
+        qreal dist = dx * dx + dy * dy;  // 距离平方
+        
+        if (dist < minDist) {
+            minDist = dist;
+            nearest = cell;
+        }
+    }
+    
+    return nearest;
+}
+
+/**
+ * @brief 绘制5×5网格线
+ * 
+ * @details 使用手动定义的25个格子坐标绘制网格线。
+ *          每个格子的坐标在 initGrid5() 中手动定义。
+ *          
+ *          网格坐标系统：
+ *          - X轴：从右到左，坐标0-4（0=右边界，4=左边界）
+ *          - Y轴：从上到下，坐标0-4（0=上边界，4=下边界）
+ *          
+ *          网格用途：
+ *          - 简化路径规划决策
+ *          - 对应陀螺仪角度映射（0°向左，90°向下，180°向右，270°向上）
+ */
+void CourtMapWidget::drawGrid5(QPainter &p)
+{
+    p.save();
+    
+    // ===== 绘制网格线（明显的深灰色实线） =====
+    QPen gridPen(QColor(80, 80, 80, 200), 2, Qt::SolidLine);  // 深灰色实线，宽度2
+    p.setPen(gridPen);
+    
+    // ===== 使用手动定义的格子坐标绘制网格线 =====
+    for (const auto &cell : m_grid5Cells) {
+        // 绘制格子边界
+        QRectF widgetRect = QRectF(
+            mapToWidget(cell.rect.topLeft()),
+            mapToWidget(cell.rect.bottomRight())
+        );
+        
+        // 绘制格子的左边界和上边界（避免重复绘制）
+        if (cell.gridX == 4) {  // 最左侧格子，绘制左边界
+            p.drawLine(widgetRect.topLeft(), widgetRect.bottomLeft());
+        }
+        if (cell.gridY == 0) {  // 最顶部格子，绘制上边界
+            p.drawLine(widgetRect.topLeft(), widgetRect.topRight());
+        }
+        
+        // 绘制格子的右边界和下边界
+        p.drawLine(widgetRect.topRight(), widgetRect.bottomRight());    // 右边界
+        p.drawLine(widgetRect.bottomLeft(), widgetRect.bottomRight()); // 下边界
+    }
+    
+    p.restore();
+}
