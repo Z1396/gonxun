@@ -20,6 +20,12 @@
 #include <QThread>
 // 控制台日志输出
 #include <iostream>
+// OpenCV 图像处理
+#include <opencv2/opencv.hpp>
+// QImage 转换
+#include <QImage>
+// 帧率计算
+#include <chrono>
 
 namespace gonxun {
 
@@ -45,33 +51,97 @@ VisionWorker::VisionWorker(VisionSystem* vs, std::atomic<bool>* running)
  *  3. 读取失败：短暂休眠防CPU满载空转
  *  4. 退出循环后发射结束信号，触发资源自动回收
  */
-void VisionWorker::run() {
+void VisionWorker::run() 
+{
     std::cout << "[VisionWorker] 视觉系统线程启动" << std::endl;
 
     // 引入全局原子运行标记（系统级优雅退出开关）
     extern std::atomic<bool> g_running;
 
+    // ========== 主摄像头帧率计算变量 ==========
+    auto main_last_time = std::chrono::high_resolution_clock::now();
+    int main_frame_count = 0;
+    double main_fps = 0.0;
+
+    // ========== 扫码摄像头帧率计算变量 ==========
+    auto qr_last_time = std::chrono::high_resolution_clock::now();
+    int qr_frame_count = 0;
+    double qr_fps = 0.0;
+
     // ========== 双层线程安全死循环 ==========
-    // *running_：外部控制器启停控制
-    // g_running：全局程序退出控制（信号触发）
-    while (*running_ && g_running) {
-        // 读取主相机原始图像帧
+    while (*running_ && g_running) 
+    {
+        // 读取当前视觉模式（替代原 serial_comm.unit 原子量）
+        int current_unit = vision_system_->current_vision_mode();
+
+        // ---------- 主摄像头处理 ----------
         auto [success, frame] = vision_system_->camera.read_main();
 
-        if (success) {
-            // 帧读取成功：执行完整视觉处理流水线
-            // 包含畸变校正、YOLO识别、卡尔曼滤波、坐标解算
-            cv::Mat result = vision_system_->process_frame(frame, -1);
-        } else {
-            // 相机读取失败/无帧：休眠10ms，降低CPU占用
-            // 避免设备未就绪、断连时死循环空跑
+        if (success) 
+        {
+            // 帧率计算
+            main_frame_count++;
+            auto current_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - main_last_time);
+            if (duration.count() >= 1000) {
+                main_fps = main_frame_count * 1000.0 / duration.count();
+                main_frame_count = 0;
+                main_last_time = current_time;
+            }
+
+            // 视觉处理流水线
+            cv::Mat result = vision_system_->process_frame(frame, current_unit);
+            
+            // 绘制帧率
+            std::string fps_text = "FPS: " + std::to_string(static_cast<int>(main_fps));
+            cv::putText(result, fps_text, cv::Point(10, 30), 
+                        cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
+            
+            // 优化：原地 BGR→RGB 转换，避免额外拷贝
+            cv::cvtColor(result, result, cv::COLOR_BGR2RGB);
+            
+            // 创建 QImage 并深拷贝发射（线程安全必须深拷贝）
+            QImage qimg(result.data, result.cols, result.rows, 
+                        static_cast<int>(result.step), QImage::Format_RGB888);
+            emit frame_ready(qimg.copy());
+        } else 
+        {
             QThread::msleep(10);
+        }
+
+        // ---------- 扫码摄像头：仅在 QR 模式下读取 ----------
+        if (current_unit == VISION_QR) 
+        {
+            auto [qr_success, qr_frame] = vision_system_->camera.read_qr();
+            if (qr_success && !qr_frame.empty())
+            {
+                // 帧率计算
+                qr_frame_count++;
+                auto current_time = std::chrono::high_resolution_clock::now();
+                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - qr_last_time);
+                if (duration.count() >= 1000) {
+                    qr_fps = qr_frame_count * 1000.0 / duration.count();
+                    qr_frame_count = 0;
+                    qr_last_time = current_time;
+                }
+
+                // 绘制帧率（原地操作，不 clone）
+                std::string fps_text = "FPS: " + std::to_string(static_cast<int>(qr_fps));
+                cv::putText(qr_frame, fps_text, cv::Point(10, 30), 
+                            cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
+
+                // 优化：原地 BGR→RGB 转换
+                cv::cvtColor(qr_frame, qr_frame, cv::COLOR_BGR2RGB);
+                
+                // 创建 QImage 并深拷贝发射
+                QImage qimg(qr_frame.data, qr_frame.cols, qr_frame.rows, 
+                            static_cast<int>(qr_frame.step), QImage::Format_RGB888);
+                emit qr_frame_ready(qimg.copy());
+            }
         }
     }
 
-    // 跳出循环，线程即将结束
     std::cout << "[VisionWorker] 视觉系统线程退出" << std::endl;
-    // 发射线程结束信号，触发后续资源清理链式回调
     emit finished();
 }
 
@@ -103,8 +173,10 @@ VisionController::~VisionController() {
  *  4. 绑定全套生命周期信号槽
  *  5. 启动子线程，开始循环推理
  */
-void VisionController::start() {
+void VisionController::start() 
+{
     // 防重入：已运行直接返回，防止重复创建线程
+    /*在vision_controller构造函数中初始化running_为false，所以这里需要判断是否已运行*/
     if (running_) return;
     running_ = true;
 
@@ -114,6 +186,11 @@ void VisionController::start() {
 
     // 2. 核心：将Worker对象移动到新线程执行
     // Qt规则：所有耗时业务必须在所属线程执行，禁止跨线程调用
+    //moveToThread，将对象移动到指定线程执行，避免跨线程调用
+    // 例如：将worker_移动到thread_线程执行，避免在主线程调用worker_的run()方法
+    // 从而导致UI卡顿或程序崩溃等价写法：worker_->run();
+    // 等价写法：worker_->run(); 但此写法会在主线程同步执行，导致UI卡顿
+    // 正确做法：moveToThread将对象移动到子线程，实现异步执行
     worker_->moveToThread(thread_);
 
     // ========== 生命周期信号槽绑定（全自动回收） ==========
@@ -127,6 +204,12 @@ void VisionController::start() {
     connect(worker_, &VisionWorker::finished, worker_, &QObject::deleteLater);
     // 线程退出后，自动释放线程内存
     connect(thread_, &QThread::finished, thread_, &QObject::deleteLater);
+
+    // ========== 图像信号转发（子线程 -> 主线程） ==========
+    // 转发主摄像头图像信号
+    connect(worker_, &VisionWorker::frame_ready, this, &VisionController::frame_ready);
+    // 转发扫码摄像头图像信号
+    connect(worker_, &VisionWorker::qr_frame_ready, this, &VisionController::qr_frame_ready);
 
     // 3. 启动子线程
     thread_->start();

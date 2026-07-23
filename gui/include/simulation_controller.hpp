@@ -1,13 +1,12 @@
 /// @file simulation_controller.hpp
-/// @brief GUI可视化仿真控制器，驱动5×5格子BFS路径规划与动画播放。
+/// @brief GUI可视化仿真控制器，驱动5×5格子BFS路径规划与段级 pace 动画。
 ///        按任务编码顺序依次导航至扫码区→原料区→粗加工区→暂存区，
 ///        每段路径使用BFS避开已标记障碍物，到达后驻留等待再规划下一段。
-///        同时通过 MotionController 将步进指令下发至下位机。
+///        动画与下位机段进度严格同步：收到 segment_completed 才推进机器人位置。
 
 #pragma once
 
 #include "courtmapwidget.hpp"
-#include "data_panel_widget.hpp"
 #include "motion_controller.hpp"
 #include "task_state_machine.hpp"
 
@@ -16,14 +15,20 @@
 #include <QTimer>
 #include <QVector>
 
+#include <cstdint>
+#include <functional>
+#include <optional>
+#include <utility>
+
 /// @brief 仿真阶段枚举，描述仿真控制器的当前运行阶段。
 enum class SimPhase {
-    IDLE,       ///< 空闲，未启动仿真
-    PLANNING,   ///< 正在为当前段规划BFS路径
-    MOVING,     ///< 正在沿路径动画移动
-    DWELLING,   ///< 到达目标后驻留等待
-    COMPLETED,  ///< 全部导航段已完成
-    ERROR       ///< 路径规划失败或其他错误
+    IDLE,                ///< 空闲，未启动仿真
+    PLANNING,            ///< 正在为当前段规划BFS路径
+    WAITING_MOVE_DONE,   ///< 已发送路径段，等待下位机 move_done
+    WAITING_GRAB_DONE,   ///< 已发送抓取指令，等待下位机 grab_done
+    DWELLING,            ///< 到达目标后驻留等待
+    COMPLETED,           ///< 全部导航段已完成
+    ERROR                ///< 路径规划失败或其他错误
 };
 
 /// @brief 仿真控制器，管理多段导航序列的路径规划、动画播放与状态机推进。
@@ -39,11 +44,9 @@ class SimulationController : public QObject
 public:
     /// @brief 构造仿真控制器，初始化动画定时器与状态机回调。
     /// @param map_widget 赛场地图控件（必须存在）
-    /// @param data_panel 数据面板（可为 nullptr）
     /// @param motion_controller 运动控制器（可为 nullptr）
     /// @param parent 父对象
     explicit SimulationController(CourtMapWidget& map_widget,
-                                  DataPanelWidget* data_panel = nullptr,
                                   MotionController* motion_controller = nullptr,
                                   QObject* parent = nullptr) noexcept;
     ~SimulationController() override = default;
@@ -60,10 +63,6 @@ public:
     /// @return true 正在运行
     [[nodiscard]] bool is_running() const noexcept { return running_; }
 
-    /// @brief 设置动画帧间隔。
-    /// @param ms 间隔毫秒数，默认50ms（20fps）
-    void set_animation_interval(int ms) noexcept { anim_interval_ = ms; }
-
     /// @brief 设置到达目标后的驻留时间。
     /// @param ms 驻留毫秒数，默认1000ms
     void set_dwell_time(int ms) noexcept { dwell_time_ = ms; }
@@ -71,6 +70,16 @@ public:
     /// @brief 设置总循环次数。
     /// @param cycles 循环次数，默认1
     void set_total_cycles(int cycles) noexcept { total_cycles_ = cycles; }
+
+    // ==== 物料坐标提供者（到达抓取目标时由 MainWindow 注入） ====
+
+    /// @brief 物料坐标提供者：返回下一个待抓取物料坐标，无则 nullopt
+    using CoordProvider = std::function<std::optional<std::pair<uint16_t, uint16_t>>()>;
+
+    /// @brief 设置物料坐标提供者（由 MainWindow 注入，读取 VisionSystem 缓存）
+    void set_material_coord_provider(CoordProvider p) noexcept {
+        material_coord_provider_ = std::move(p);
+    }
 
 signals:
     /// @brief 仿真成功启动时发射。
@@ -86,9 +95,18 @@ signals:
     void phase_changed(SimPhase phase, const QString& description);
 
 private slots:
-    /// @brief 动画定时器回调，每帧将机器人沿当前路径前进一步。
-    ///        路径走完后自动转入驻留阶段。
-    void on_animation_tick();
+    /// @brief 收到一段移动完成（move_done）：把机器人跳到该段终点。
+    /// @param seg_idx 段索引
+    void on_segment_completed(int seg_idx);
+
+    /// @brief 整段路径全部完成（path_completed）：判断是否需要抓取。
+    void on_path_completed();
+
+    /// @brief 抓取完成（grab_done）：进入驻留或推进下一段。
+    void on_grab_completed();
+
+    /// @brief 运动错误：停止仿真。
+    void on_motion_error(const QString& err);
 
 private:
     /// @brief 启动下一段导航：更新阶段为PLANNING，调用plan_current_segment()。
@@ -98,10 +116,7 @@ private:
     ///        若起点与终点重合则直接完成；若路径被阻断则报错停止。
     void plan_current_segment();
 
-    /// @brief 切换至MOVING阶段，重置路径索引并启动动画定时器。
-    void start_moving();
-
-    /// @brief 切换至DWELLING阶段，停止动画定时器，延迟后调用on_segment_complete()。
+    /// @brief 切换至DWELLING阶段：停止动画，延迟dwell_time_后推进到下一段。
     void start_dwelling();
 
     /// @brief 当前段完成处理：推进状态机事件、清除路径、递增段索引。
@@ -109,6 +124,10 @@ private:
 
     /// @brief 全部导航段完成：停止定时器，设阶段COMPLETED，发射simulation_finished(true)。
     void on_all_complete();
+
+    /// @brief 判断当前导航目标是否需要抓取（原料区/粗加工区）。
+    /// @return true 表示到达后需要发送抓取指令
+    [[nodiscard]] bool current_target_needs_grab() const;
 
     /// @brief 导航目标结构，描述一个要到达的格子位置。
     struct NavTarget {
@@ -123,7 +142,6 @@ private:
 
 private:
     CourtMapWidget& map_widget_;            ///< 赛场地图控件
-    DataPanelWidget* data_panel_;           ///< 数据面板控件（可为空）
     MotionController* motion_controller_;   ///< 运动控制器（可为空）
 
     gonxun::TaskStateMachine state_machine_; ///< 任务状态机
@@ -131,20 +149,20 @@ private:
     bool running_ = false;                   ///< 仿真是否正在运行
     SimPhase phase_ = SimPhase::IDLE;        ///< 当前仿真阶段
     int current_segment_ = 0;                ///< 当前导航段索引
-    int current_path_idx_ = 0;               ///< 当前路径点动画索引
     int current_cycle_ = 0;                  ///< 当前循环计数
     int total_cycles_ = 1;                   ///< 总循环次数
 
     QVector<NavTarget> nav_sequence_;        ///< 导航目标序列
-    gonxun::Path current_path_;              ///< 当前段路径点序列
+    QVector<QPair<int, int>> segment_endpoints_; ///< 当前段路径每段的终点格子坐标
 
-    QTimer* anim_timer_ = nullptr;           ///< 动画定时器
-    int anim_interval_ = 50;                 ///< 动画帧间隔(ms)
-    int dwell_time_ = 1000;                  ///< 驻留时间(ms)
+    QTimer* dwell_timer_ = nullptr;          ///< 驻留定时器
+    int dwell_time_ = 1000;                   ///< 驻留时间(ms)
 
     QElapsedTimer total_timer_;              ///< 仿真总耗时计时器
     double total_distance_ = 0.0;            ///< 累计移动距离(mm)
     int total_steps_ = 0;                    ///< 累计动画步数
 
     QString task_code_;                      ///< 当前任务编码
+
+    CoordProvider material_coord_provider_;  ///< 物料坐标提供者（可为空）
 };

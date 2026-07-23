@@ -49,17 +49,44 @@ motion:
 # ========== 摄像头配置 ==========
 camera:
   # 主摄像头 (物料/色环识别)
+  # 型号: Microdia HJ USB 2.0 Camera
   main:
     # 设备索引 (/dev/video0 对应索引 0)
-    index: 1
+    index: 0
     # 分辨率
     width: 640
     height: 480
+    # 缓冲区大小（帧数），越小延迟越低
+    buffer_size: 1
+    # 自动曝光 (0=手动模式, 1=自动模式)
+    # 手动模式下曝光值才会生效
+    auto_exposure: 0
+    # 曝光值 (exposure_time_absolute)
+    # 范围: 1 ~ 5000，值越大画面越亮，值越小帧率越高
+    # 建议: 50-200 获得高帧率
+    exposure: 20
+    # 增益值
+    # 范围: 0 ~ 100
+    gain: 5
   # 扫码摄像头 (二维码识别)
+  # 型号: Sunplus HD Camera
   qr:
+    # 设备索引 (/dev/video2 对应索引 2)
     index: 2
+    # 分辨率
     width: 640
     height: 480
+    # 缓冲区大小（帧数），越小延迟越低
+    buffer_size: 1
+    # 自动曝光 (0=手动模式, 1=自动模式)
+    auto_exposure: 0
+    # 曝光值 (exposure_time_absolute)
+    # 范围: 10 ~ 626，值越大画面越亮
+    # 建议: 50-200 获得高帧率
+    exposure: 200
+    # 增益值
+    # 范围: 1 ~ 8
+    gain: 2
 
 # ========== 颜色识别配置 ==========
 color_detection:

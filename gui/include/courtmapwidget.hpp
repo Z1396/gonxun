@@ -115,6 +115,17 @@ public:
     /// @return true 可见
     [[nodiscard]] bool is_robot_visible() const noexcept { return robot_visible_; }
 
+    /// @brief 设置任务码显示（在地图顶部显示）。
+    /// @param task_code 任务码字符串，格式如 "156+123+516+231"
+    void set_task_code(const QString& task_code);
+
+    /// @brief 设置地图全局缩放因子。
+    /// @param factor 缩放因子，1.0为原始大小，0.5为缩小一半，2.0为放大两倍
+    void set_scale_factor(qreal factor) noexcept { scale_factor_ = factor; update(); }
+
+    /// @brief 获取地图全局缩放因子。
+    [[nodiscard]] qreal scale_factor() const noexcept { return scale_factor_; }
+
     /// @brief 设置路径点序列，触发重绘显示路径。
     /// @param points 路径点列表（赛场坐标mm）
     void set_path(const QVector<QPointF> &points);
@@ -201,7 +212,8 @@ private:
                                 const QColor &outer_color, const QColor &inner_color);
 
     /// @brief 绘制5×5格子网格线。
-    void draw_grid5(QPainter &p);
+    void draw_grid5(QPainter &p);              ///< 绘制5×5格子网格线
+    void draw_task_code(QPainter &p);          ///< 绘制任务码显示
 
     // ==== 坐标转换与命中测试 ====
 
@@ -223,10 +235,12 @@ private:
     void handle_point_selection(const QPointF &pos);
 
     static constexpr qreal MAP_SIZE = gonxun::FIELD_SIZE_MM; ///< 赛场边长(mm)
-    static constexpr qreal MARGIN = 80.0;                     ///< 绘制边距(px)
+    static constexpr qreal MARGIN = 0.0;                     ///< 绘制边距(px)
+    static constexpr qreal MARGIN_TOP = 60.0;                ///< 顶部边距，给任务码留空间(px)
 
     QRectF map_rect_;               ///< 赛场在控件中的绘制矩形
     qreal scale_ = 1.0;             ///< 赛场坐标到控件坐标的缩放因子
+    qreal scale_factor_ = 0.6;      ///< 地图全局缩放因子（用户可调）
 
     QVector<CourtZone> zones_;      ///< 启停区列表
     QVector<CourtCircle> buffer_circles_;    ///< 暂存区圆圈列表
@@ -241,6 +255,8 @@ private:
     QPointF robot_pos_{2250, 150};          ///< 机器人位置(mm)
     qreal robot_angle_ = 180.0;             ///< 机器人朝向角度(°)
     bool robot_visible_ = false;            ///< 机器人是否可见
+
+    QString task_code_;                     ///< 任务码（如 "156+123+516+231"）
 
     QVector<QPointF> path_points_;          ///< 路径点列表(mm)
 };

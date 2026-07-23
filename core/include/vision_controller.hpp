@@ -10,8 +10,10 @@
 #pragma once
 
 #include <QThread>
+#include <QImage>
 #include <atomic>
 #include <QObject>
+#include <opencv2/opencv.hpp>
 
 class VisionSystem;
 
@@ -41,6 +43,10 @@ public slots:
 signals:
     /// 工作线程正常退出时发射
     void finished();
+    /// 主摄像头图像帧就绪
+    void frame_ready(const QImage& frame);
+    /// 扫码摄像头图像帧就绪
+    void qr_frame_ready(const QImage& frame);
 
 private:
     VisionSystem* vision_system_;     ///< 视觉系统实例
@@ -69,6 +75,12 @@ public slots:
     void start();
     /// 停止视觉线程并等待退出
     void stop();
+
+signals:
+    /// 主摄像头图像帧就绪（转发自 VisionWorker）
+    void frame_ready(const QImage& frame);
+    /// 扫码摄像头图像帧就绪（转发自 VisionWorker）
+    void qr_frame_ready(const QImage& frame);
 
 private slots:
     /// 工作线程完成时的清理回调

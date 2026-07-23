@@ -16,10 +16,22 @@
 #include "camera_manager.hpp"
 #include "task_display.hpp"
 #include "obstacle_detector.hpp"
+#include "config_loader.hpp"
 #include <array>
+#include <atomic>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 #include <opencv2/opencv.hpp>
+
+// ==== 视觉检测模式常量（VisionSystem 内部用，与下位机协议无关） ====
+
+constexpr uint8_t VISION_IDLE  = 0;   ///< 空闲
+constexpr uint8_t VISION_COLOR = 1;   ///< 物料颜色识别
+constexpr uint8_t VISION_RING  = 3;   ///< 圆环检测
+constexpr uint8_t VISION_DOCK  = 4;   ///< 对接停靠
+constexpr uint8_t VISION_QR    = 9;   ///< 二维码扫描
 
 /// @brief 颜色编号到名称的映射 (1=红, 2=黄, 3=蓝, 4=绿, 5=黑, 6=浅蓝)
 [[nodiscard]] inline std::string color_code_to_name(int code) {
@@ -48,8 +60,10 @@
 }
 
 /// @brief 颜色编号到显示标签的映射
-[[nodiscard]] inline std::string color_code_to_label(int code) {
-    switch (code) {
+[[nodiscard]] inline std::string color_code_to_label(int code) 
+{
+    switch (code) 
+    {
         case 1: return "R";
         case 2: return "Y";
         case 3: return "B";
@@ -69,24 +83,17 @@
 class VisionSystem {
 public:
     /**
-     * @brief 构造函数，初始化所有子模块
-     * @param serial_mock 是否使用模拟串口
-     * @param serial_port 串口设备路径，空则使用默认
-     * @param baudrate 波特率
-     * @param main_camera 主摄像头索引，-1 使用默认
-     * @param qr_camera 扫码摄像头索引，-1 使用默认
+     * @brief 构造函数：从全局配置初始化全部子模块
+     * @param cfg 系统配置（串口、摄像头、YOLO 等参数均从中读取）
+     * @param serial_comm 外部传入的串口通信实例（由 main 统一管理，与 MainWindow 共享）
      */
-    explicit VisionSystem(bool serial_mock = true,
-                          const std::string& serial_port = "",
-                          int baudrate = 115200,
-                          int main_camera = -1,
-                          int qr_camera = -1);
+    explicit VisionSystem(const gonxun::Config& cfg, SerialComm& serial_comm);
     ~VisionSystem() = default;
 
     /**
      * @brief 单帧图像统一处理入口
      * @param img 输入 BGR 图像
-     * @param unit 工作模式，-1 则从串口读取当前模式
+     * @param unit 工作模式，-1 则读取当前视觉模式
      * @return 标注后的结果图像
      */
     [[nodiscard]] cv::Mat process_frame(const cv::Mat& img, int unit = -1);
@@ -103,10 +110,33 @@ public:
      */
     void set_current_batch(int batch);
 
-    SerialComm serial_comm;          ///< 串口通信实例（公开，供外部读取模式/发送数据）
-    CameraManager camera;            ///< 双摄像头管理器
-    QRDetector qr_detector;          ///< QR 码检测器
-    TaskCodeParser task_parser;      ///< 任务码解析器
+    SerialComm& serial_comm;          ///< 串口通信实例（外部注入，与 MainWindow 共享）
+    CameraManager camera;             ///< 双摄像头管理器
+    QRDetector qr_detector;           ///< QR 码检测器
+    TaskCodeParser task_parser;        ///< 任务码解析器
+
+    // ---- 视觉模式控制（替代原 serial_comm.unit 原子量） ----
+    /// @brief 设置视觉检测模式（VISION_COLOR/RING/DOCK/QR）
+    void set_vision_mode(uint8_t mode) noexcept {
+        override_unit_.store(mode, std::memory_order_relaxed);
+        manual_mode_.store(true, std::memory_order_relaxed);
+    }
+    /// @brief 读取当前视觉检测模式
+    [[nodiscard]] uint8_t current_vision_mode() const noexcept {
+        return override_unit_.load(std::memory_order_relaxed);
+    }
+
+    // ---- 物料坐标缓存（供上层在 mode=2 定位时取用） ----
+    /// @brief 获取最近一次物料检测坐标列表
+    [[nodiscard]] const std::vector<std::pair<uint16_t, uint16_t>>& material_coords() const noexcept {
+        return last_material_coords_;
+    }
+    /// @brief 清空物料坐标缓存
+    void clear_material_coords() noexcept { last_material_coords_.clear(); }
+
+    // ---- 模式覆写机制（保留调试用，已封装在 set_vision_mode/current_vision_mode） ----
+    std::atomic<bool> manual_mode_{false};       ///< 是否手动模式覆写
+    std::atomic<uint8_t> override_unit_{VISION_IDLE}; ///< 手动模式下的视觉模式
 
 private:
     /**
@@ -151,4 +181,17 @@ private:
     TaskCode current_task_;                       ///< 当前任务码
     int current_batch_{1};                         ///< 当前批次 (1 或 2)
     bool task_set_{false};                         ///< 任务码是否已设置
+
+    std::vector<std::pair<uint16_t, uint16_t>> last_material_coords_;  ///< 最近一次物料检测坐标缓存
+
+public:
+    /// @brief QR码扫描回调函数类型
+    using QRCallback = std::function<void(const std::string&)>;
+
+    /// @brief 设置QR码扫描回调
+    /// @param callback 扫码成功时调用的回调函数
+    void set_qr_callback(QRCallback callback) { qr_callback_ = std::move(callback); }
+
+private:
+    QRCallback qr_callback_;                      ///< QR码扫描回调
 };

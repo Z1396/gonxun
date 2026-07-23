@@ -151,12 +151,16 @@ void ConfigLoader::parse_motion(const YAML::Node& node) {
 /**
  * @brief 解析相机模块配置
  * @param node YAML中camera节点
- * @brief 支持双相机配置：主相机+QR识别相机，分层嵌套解析
+ * @brief 支持双相机配置：主相机+QR识别相机，每个相机独立参数
  * @subnode main 主视觉相机配置（画面采集、视觉检测）
  * @subnode qr QR码识别专用相机配置
  * @field index 相机设备索引号
  * @field width 图像采集宽度
  * @field height 图像采集高度
+ * @field buffer_size 缓冲区大小
+ * @field auto_exposure 自动曝光
+ * @field exposure 曝光值
+ * @field gain 增益值
  */
 void ConfigLoader::parse_camera(const YAML::Node& node) {
     // 解析主相机配置
@@ -165,6 +169,10 @@ void ConfigLoader::parse_camera(const YAML::Node& node) {
         if (main["index"]) config_.camera.main.index = main["index"].as<int>();
         if (main["width"]) config_.camera.main.width = main["width"].as<int>();
         if (main["height"]) config_.camera.main.height = main["height"].as<int>();
+        if (main["buffer_size"]) config_.camera.main.buffer_size = main["buffer_size"].as<int>();
+        if (main["auto_exposure"]) config_.camera.main.auto_exposure = main["auto_exposure"].as<int>();
+        if (main["exposure"]) config_.camera.main.exposure = main["exposure"].as<int>();
+        if (main["gain"]) config_.camera.main.gain = main["gain"].as<int>();
     }
     // 解析QR相机配置
     if (node["qr"]) {
@@ -172,6 +180,10 @@ void ConfigLoader::parse_camera(const YAML::Node& node) {
         if (qr["index"]) config_.camera.qr.index = qr["index"].as<int>();
         if (qr["width"]) config_.camera.qr.width = qr["width"].as<int>();
         if (qr["height"]) config_.camera.qr.height = qr["height"].as<int>();
+        if (qr["buffer_size"]) config_.camera.qr.buffer_size = qr["buffer_size"].as<int>();
+        if (qr["auto_exposure"]) config_.camera.qr.auto_exposure = qr["auto_exposure"].as<int>();
+        if (qr["exposure"]) config_.camera.qr.exposure = qr["exposure"].as<int>();
+        if (qr["gain"]) config_.camera.qr.gain = qr["gain"].as<int>();
     }
 }
 

@@ -33,13 +33,10 @@ gonxun/
 │
 ├── core/                            # 核心库 (libgonxun_core.so)
 │   ├── include/                     # 头文件
-│   │   ├── astar_planner.hpp        # A* 路径规划
-│   │   ├── grid_planner.hpp         # 3×3 网格规划
+│   │   ├── common_types.hpp         # 通用数据类型
+│   │   ├── grid5_path_planner.hpp   # 5×5 网格规划
 │   │   ├── task_state_machine.hpp   # 任务状态机
-│   │   ├── robot_controller.hpp     # 机器人控制
-│   │   ├── task_simulator.hpp       # 任务仿真
 │   │   ├── vision_controller.hpp    # 视觉线程管理
-│   │   ├── cli_parser.hpp           # 命令行解析
 │   │   └── app_signals.hpp          # 信号处理
 │   └── src/                         # 源文件
 │
@@ -110,7 +107,7 @@ gonxun/
 ├─────────────────────────────────────────────────┤
 │              gonxun_core (核心库)                │
 │  ┌────────┐ ┌────────┐ ┌────────┐ ┌─────────┐  │
-│  │A*规划  │ │网格规划│ │状态机  │ │仿真器   │  │
+│  │BFS规划 │ │网格规划│ │状态机  │ │仿真器   │  │
 │  └────────┘ └────────┘ └────────┘ └─────────┘  │
 ├─────────────────────────────────────────────────┤
 │             gonxun_vision (视觉库)               │

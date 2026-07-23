@@ -9,7 +9,6 @@
  */
 #pragma once
 
-#include "config.hpp"
 #include <climits>
 #include <memory>
 #include <optional>

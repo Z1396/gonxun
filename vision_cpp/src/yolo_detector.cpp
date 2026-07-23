@@ -37,14 +37,11 @@ YOLOv8Detector::YOLOv8Detector(const std::string& engine_path,
     : imgsz_(imgsz), conf_threshold_(conf_threshold) {
 
 #ifdef TENSORRT_AVAILABLE
-    // 推导 Engine 路径: 若为空，从 TorchScript 路径替换扩展名
+    // 推导 Engine 路径: 从 TorchScript 路径替换扩展名为 .engine
     std::string path = engine_path;
-    if (path.empty()) {
-        path = config::YOLO_TS_MODEL_PATH;
-        size_t pos = path.rfind('.');
-        if (pos != std::string::npos) {
-            path = path.substr(0, pos) + ".engine";
-        }
+    size_t pos = path.rfind('.');
+    if (pos != std::string::npos) {
+        path = path.substr(0, pos) + ".engine";
     }
     engine_path_ = path;
 
@@ -165,17 +162,17 @@ void YOLOv8Detector::free_buffers() {
  * @param input_buffer 主机端输入缓冲区 (NCHW 排列)
  */
 void YOLOv8Detector::preprocess(const cv::Mat& img, float* input_buffer) {
-    cv::Mat resized;
+    cv::Mat resized, rgb;
     cv::resize(img, resized, cv::Size(imgsz_, imgsz_), 0, 0, cv::INTER_LINEAR);
+    cv::cvtColor(resized, rgb, cv::COLOR_BGR2RGB);
 
-    // BGR→RGB, 归一化到 [0,1], NCHW 排列
+    // 向量化：split 分离三通道 + convertTo 归一化至 NCHW 缓冲区
+    std::vector<cv::Mat> channels(3);
+    cv::split(rgb, channels);
     for (int c = 0; c < 3; ++c) {
-        for (int h = 0; h < imgsz_; ++h) {
-            for (int w = 0; w < imgsz_; ++w) {
-                float val = static_cast<float>(resized.at<cv::Vec3b>(h, w)[2 - c]) / 255.0f;
-                input_buffer[c * imgsz_ * imgsz_ + h * imgsz_ + w] = val;
-            }
-        }
+        channels[c].convertTo(
+            cv::Mat(imgsz_, imgsz_, CV_32FC1, input_buffer + c * imgsz_ * imgsz_),
+            CV_32FC1, 1.0f / 255.0f);
     }
 }
 
@@ -265,7 +262,8 @@ std::vector<Detection> YOLOv8Detector::detect(const cv::Mat& img) {
 std::optional<cv::Point> YOLOv8Detector::detect_center(const cv::Mat& img,
                                                        const std::string& color,
                                                        int min_area,
-                                                       int max_area) {
+                                                       int max_area) 
+{
     if (!available_ || img.empty()) return std::nullopt;
 
 #ifdef TENSORRT_AVAILABLE

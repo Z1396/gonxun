@@ -9,7 +9,7 @@
 
 #pragma once
 
-#include "astar_planner.hpp"
+#include "common_types.hpp"
 
 #include <chrono>
 #include <functional>

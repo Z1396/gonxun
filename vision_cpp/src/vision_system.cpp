@@ -15,56 +15,58 @@
  *  - MODE_QR:    读取扫码摄像头 → 解码 → 发送 QR 数据
  */
 #include "vision_system.hpp"
-#include "config.hpp"
 
 #include <climits>
 #include <iostream>
 
 /**
  * @brief VisionSystem 构造函数
- * @param serial_mock 是否开启串口模拟模式（调试无硬件时使用）
- * @param serial_port 自定义串口设备路径，为空则读取配置文件默认值
- * @param baudrate 串口波特率
- * @param main_camera 主摄像头设备索引，-1 使用默认配置
- * @param qr_camera 扫码摄像头设备索引，-1 使用默认配置
+ * @param cfg 系统配置，串口/摄像头/YOLO 等参数均从中读取
+ * @param serial_comm 外部注入的串口实例（与 MainWindow 共享单实例）
  *
  * 初始化模块清单：
- *  1. 串口通信模块：负责向下位机上报视觉坐标、二维码数据
- *  2. 双相机采集模块：主相机（物料/圆环）+ 扫码相机（二维码）
- *  3. YOLO检测器：智能颜色目标识别
- *  4. 三组卡尔曼滤波器：分别平滑三组目标坐标，消除抖动噪点
+ *  1. 双相机采集模块：主相机（物料/圆环）+ 扫码相机（二维码）
+ *  2. YOLO检测器：智能颜色目标识别
+ *  3. 三组卡尔曼滤波器：分别平滑三组目标坐标，消除抖动噪点
  *
- * @note 完全基于 config 配置文件参数初始化，统一项目参数管理
+ * @note 串口通信实例由外部（main）统一构造并注入，避免双实例争抢串口
  * @note 启动自检，提示YOLO模型加载状态，提前暴露初始化异常
  */
-VisionSystem::VisionSystem(bool serial_mock, const std::string& serial_port,
-                           int baudrate, int main_camera, int qr_camera)
-    // 初始化串口通信：自定义参数兜底，无参数使用全局配置
-    : serial_comm(serial_mock,
-                  serial_port.empty() ? config::SERIAL_PORT : serial_port,
-                  baudrate,
-                  MODE_IDLE,
-                  config::SERIAL_MOCK_CYCLE),
-    // 初始化双相机：分辨率、设备索引全部读取配置文件
-      camera(main_camera >= 0 ? main_camera : config::CAMERA_MAIN_INDEX,
-             qr_camera >= 0 ? qr_camera : config::CAMERA_QR_INDEX,
-             config::CAMERA_MAIN_WIDTH, config::CAMERA_MAIN_HEIGHT,
-             config::CAMERA_QR_WIDTH, config::CAMERA_QR_HEIGHT),
-    // 初始化YOLO颜色检测模型：模型路径、输入尺寸、置信度阈值取自配置
-      yolo_detector_(config::YOLO_TS_MODEL_PATH,
-                     config::YOLO_IMGSZ,
-                     config::YOLO_CONF_THRESHOLD),
-    // 初始化三组卡尔曼滤波器，分别对应三组检测目标
+VisionSystem::VisionSystem(const gonxun::Config& cfg, SerialComm& serial_comm)
+    : serial_comm(serial_comm),
+      camera(
+          cfg.camera.main.index,           // 主相机设备索引
+          cfg.camera.qr.index,             // 扫码相机设备索引
+          cfg.camera.main.width,           // 主相机图像宽度
+          cfg.camera.main.height,          // 主相机图像高度
+          cfg.camera.qr.width,             // 扫码相机图像宽度
+          cfg.camera.qr.height,            // 扫码相机图像高度
+          cfg.camera.main.buffer_size,     // 主相机缓冲区大小
+          cfg.camera.main.auto_exposure,   // 主相机自动曝光开关
+          cfg.camera.main.exposure,        // 主相机曝光值（手动模式有效）
+          cfg.camera.main.gain,            // 主相机增益值
+          cfg.camera.qr.buffer_size,       // 扫码相机缓冲区大小
+          cfg.camera.qr.auto_exposure,     // 扫码相机自动曝光开关
+          cfg.camera.qr.exposure,          // 扫码相机曝光值（手动模式有效）
+          cfg.camera.qr.gain               // 扫码相机增益值
+      ),
+      yolo_detector_(
+          cfg.yolo.torchscript_path,       // YOLO TorchScript 模型文件路径
+          cfg.yolo.imgsz,                  // 模型输入图像尺寸（如 640）
+          static_cast<float>(cfg.yolo.conf_threshold)  // 检测置信度阈值
+      ),
       kalman_filters_{
-          KalmanFilter(config::KALMAN_Q, config::KALMAN_R),
-          KalmanFilter(config::KALMAN_Q, config::KALMAN_R),
-          KalmanFilter(config::KALMAN_Q, config::KALMAN_R)
-      } {
+          KalmanFilter(cfg.kalman_filter.Q, cfg.kalman_filter.R),  // 第1组目标滤波器（过程噪声Q，观测噪声R）
+          KalmanFilter(cfg.kalman_filter.Q, cfg.kalman_filter.R),  // 第2组目标滤波器
+          KalmanFilter(cfg.kalman_filter.Q, cfg.kalman_filter.R)   // 第3组目标滤波器
+      }
+{
 
     std::cout << "VisionSystem 初始化完成" << std::endl;
 
     // 模型加载自检，提前预警检测功能异常
-    if (!yolo_detector_.is_available()) {
+    if (!yolo_detector_.is_available())
+    {
         std::cerr << "[警告] YOLO 模型未加载，颜色检测功能不可用" << std::endl;
     }
 }
@@ -92,7 +94,8 @@ void VisionSystem::set_current_batch(int batch) {
  *  2. 三组目标独立滤波，互不干扰
  *  3. 浮点滤波计算 + 整型输出，适配下位机指令格式
  */
-std::pair<int, int> VisionSystem::filter_position(float x, float y, int kf_index) {
+std::pair<int, int> VisionSystem::filter_position(float x, float y, int kf_index) 
+{
     // 构造二维观测矩阵 (X,Y)
     cv::Matx21f z(x, y);
     // 卡尔曼迭代滤波，输出平滑后坐标
@@ -120,26 +123,46 @@ std::pair<int, int> VisionSystem::filter_position(float x, float y, int kf_index
 std::vector<std::pair<int, int>> VisionSystem::detect_three_colors(
     cv::Mat& img,
     const std::vector<std::tuple<std::string, std::string, cv::Scalar>>& color_specs,
-    int min_area, int max_area) {
+    int min_area, int max_area) 
+{
+    // 一次推理获取全部检测结果，避免每种颜色重复推理
+    auto detections = yolo_detector_.detect(img);
 
     std::vector<std::pair<int, int>> positions;
 
-    // 逐一检测指定颜色目标
-    for (const auto& [color, label, draw_color] : color_specs) {
-        // YOLO检测目标中心，带面积阈值过滤
-        auto pos = yolo_detector_.detect_center(img, color, min_area, max_area);
-        // 任一目标缺失，直接返回空，放弃本次帧上报
-        if (!pos) return {};
-        positions.push_back({pos->x, pos->y});
+    for (const auto& [color, label, draw_color] : color_specs) 
+    {
+        // 按颜色类名过滤，找面积最大的匹配目标
+        std::string target_class = color + "_block";
+        const Detection* best = nullptr;
+        int best_area = 0;
+
+        for (const auto& det : detections) 
+        {
+            if (det.class_name != target_class) continue;
+
+            int area = det.size().area();
+            if (area >= min_area && area <= max_area && area > best_area) 
+            {
+                best_area = area;
+                best = &det;
+            }
+        }
+
+        // 任一目标缺失，放弃本次帧上报
+        if (!best) return {};
+        positions.push_back({best->center().x, best->center().y});
     }
 
     // 对三组原始坐标分别滤波平滑
     std::vector<std::pair<int, int>> filtered;
-    for (size_t idx = 0; idx < positions.size(); ++idx) {
+    for (size_t idx = 0; idx < positions.size(); ++idx) 
+    {
         auto [fx, fy] = filter_position(
             static_cast<float>(positions[idx].first),
             static_cast<float>(positions[idx].second),
             static_cast<int>(idx));
+
         filtered.push_back({fx, fy});
 
         // 画面可视化渲染：实心圆点 + 字符标签
@@ -153,33 +176,37 @@ std::vector<std::pair<int, int>> VisionSystem::detect_three_colors(
 }
 
 /**
- * @brief 物料颜色检测模式处理流程 MODE_COLOR
+ * @brief 物料颜色检测模式处理流程 VISION_COLOR
  * @param result_img 待渲染图像
  * @details
  *  根据任务码动态选择3种颜色进行检测
- *  流程：检测 -> 滤波平滑 -> 画面绘制 -> 串口上报 CMD_COLOR
+ *  流程：检测 -> 滤波平滑 -> 画面绘制 -> 缓存坐标供上层 mode=2 上传
  *  异常防护：try-catch捕获单帧异常，不崩溃线程
  */
-void VisionSystem::process_color(cv::Mat& result_img) {
+void VisionSystem::process_color(cv::Mat& result_img)
+{
     try {
         std::vector<std::tuple<std::string, std::string, cv::Scalar>> color_specs;
 
         // 根据任务码获取颜色序列
-        if (task_set_) {
+        if (task_set_)
+        {
             // 获取当前批次的颜色编号
             const auto& color_codes = (current_batch_ == 1)
                 ? current_task_.batch1_colors
                 : current_task_.batch2_colors;
 
             // 构建颜色检测规格
-            for (int code : color_codes) {
+            for (int code : color_codes)
+            {
                 color_specs.emplace_back(
                     color_code_to_name(code),
                     color_code_to_label(code),
                     color_code_to_bgr(code)
                 );
             }
-        } else {
+        } else
+        {
             // 默认检测红、黄、蓝（作为备选）
             color_specs = {
                 {"red",    "R", cv::Scalar(0, 0, 255)},
@@ -191,23 +218,28 @@ void VisionSystem::process_color(cv::Mat& result_img) {
         // 统一调用通用三色检测模板
         auto filtered = detect_three_colors(result_img, color_specs, 2000, 10000);
 
-        // 检测完整则通过串口上报坐标
+        // 检测完整则缓存坐标（供上层 mode=2 定位上传）
         if (!filtered.empty()) {
-            serial_comm.send_coordinates(CMD_COLOR, filtered);
+            last_material_coords_.clear();
+            for (const auto& [x, y] : filtered) {
+                last_material_coords_.emplace_back(
+                    static_cast<uint16_t>(std::max(0, x)),
+                    static_cast<uint16_t>(std::max(0, y)));
+            }
         }
     } catch (const std::exception& e) {
-        std::cerr << "unit=1处理异常: " << e.what() << std::endl;
+        std::cerr << "VISION_COLOR处理异常: " << e.what() << std::endl;
     }
 }
 
 /**
- * @brief 圆环定位检测模式处理流程 MODE_RING
+ * @brief 圆环定位检测模式处理流程 VISION_RING
  * @param result_img 待渲染图像
  * @details
  *  专属三环定位算法检测三个定位圆环
  *  三组坐标独立卡尔曼滤波
  *  绘制青蓝色标记点，标注L/M/R左右中位置
- *  完整检测后串口上报 CMD_RING 坐标数据
+ *  完整检测后缓存坐标供上层 mode=2 上传
  */
 void VisionSystem::process_ring(cv::Mat& result_img) {
     try {
@@ -235,20 +267,25 @@ void VisionSystem::process_ring(cv::Mat& result_img) {
                         cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 255), 1);
         }
 
-        // 上报圆环定位坐标
-        serial_comm.send_coordinates(CMD_RING, filtered);
+        // 缓存圆环坐标供上层 mode=2 上传
+        last_material_coords_.clear();
+        for (const auto& [x, y] : filtered) {
+            last_material_coords_.emplace_back(
+                static_cast<uint16_t>(std::max(0, x)),
+                static_cast<uint16_t>(std::max(0, y)));
+        }
     } catch (const std::exception& e) {
-        std::cerr << "unit=3处理异常: " << e.what() << std::endl;
+        std::cerr << "VISION_RING处理异常: " << e.what() << std::endl;
     }
 }
 
 /**
- * @brief 停靠对接检测模式处理流程 MODE_DOCK
+ * @brief 停靠对接检测模式处理流程 VISION_DOCK
  * @param result_img 待渲染图像
  * @details
  *  检测顺序：蓝、绿、红三色停靠标识
  *  复用通用三色检测模板，调整面积阈值适配停靠目标尺寸
- *  滤波平滑后上报 CMD_DOCK 坐标，用于机器人精准停靠
+ *  滤波平滑后缓存坐标供上层 mode=2 上传
  */
 void VisionSystem::process_dock(cv::Mat& result_img) {
     try {
@@ -263,22 +300,28 @@ void VisionSystem::process_dock(cv::Mat& result_img) {
         auto filtered = detect_three_colors(result_img, color_specs, 3000, 10000);
 
         if (!filtered.empty()) {
-            serial_comm.send_coordinates(CMD_DOCK, filtered);
+            last_material_coords_.clear();
+            for (const auto& [x, y] : filtered) {
+                last_material_coords_.emplace_back(
+                    static_cast<uint16_t>(std::max(0, x)),
+                    static_cast<uint16_t>(std::max(0, y)));
+            }
         }
     } catch (const std::exception& e) {
-        std::cerr << "unit=4处理异常: " << e.what() << std::endl;
+        std::cerr << "VISION_DOCK处理异常: " << e.what() << std::endl;
     }
 }
 
 /**
- * @brief 二维码识别模式处理流程 MODE_QR
+ * @brief 二维码识别模式处理流程 VISION_QR
  * @param result_img 主相机图像，用于画面渲染
  * @details 双相机降级容错机制：
  *  1. 优先读取专用扫码摄像头图像解码
  *  2. 扫码相机异常/无设备时，降级使用主相机图像解码
- *  3. 解码成功后打印日志、渲染文本、串口上报二维码字符串
+ *  3. 解码成功后打印日志、渲染文本、通过 qr_callback 通知 GUI（不再发串口）
  */
-void VisionSystem::process_qr(cv::Mat& result_img) {
+void VisionSystem::process_qr(cv::Mat& result_img)
+{
     try {
         // 优先读取扫码摄像头
         auto [success, qr_img] = camera.read_qr();
@@ -290,25 +333,29 @@ void VisionSystem::process_qr(cv::Mat& result_img) {
         // 二维码解码
         auto qr_data = qr_detector.detect(target_img);
 
-        if (qr_data) {
+        if (qr_data)
+        {
             std::cout << "二维码识别成功: " << *qr_data << std::endl;
 
             // 在主画面左上角渲染二维码数据
             cv::putText(result_img, "QR: " + *qr_data, cv::Point(10, 30),
                         cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
 
-            // 串口上报二维码字符串
-            serial_comm.send_qr_data(*qr_data);
+            // 调用QR回调通知GUI更新任务码显示（不再通过串口上报）
+            if (qr_callback_)
+            {
+                qr_callback_(*qr_data);
+            }
         }
     } catch (const std::exception& e) {
-        std::cerr << "unit=9处理异常: " << e.what() << std::endl;
+        std::cerr << "VISION_QR处理异常: " << e.what() << std::endl;
     }
 }
 
 /**
  * @brief 视觉系统单帧处理统一入口（顶层调度函数）
  * @param img 原始相机BGR图像
- * @param unit 手动指定工作模式，-1 自动从串口原子变量读取下位机下发模式
+ * @param unit 手动指定工作模式，-1 自动读取当前视觉模式
  * @return cv::Mat 绘制完成、带模式标注的可视化结果图像
  *
  * 执行流程：
@@ -320,37 +367,39 @@ void VisionSystem::process_qr(cv::Mat& result_img) {
  *
  * @note 线程安全：所有模式分支独立，异常隔离，单帧报错不阻塞后续帧
  */
-cv::Mat VisionSystem::process_frame(const cv::Mat& img, int unit) 
+cv::Mat VisionSystem::process_frame(const cv::Mat& img, int unit)
 {
     // 空图像防护
     if (img.empty()) return cv::Mat();
 
-    // 自动模式：读取串口模块原子变量（下位机实时下发的工作指令）
-    if (unit < 0) 
+    // 自动模式：读取当前视觉模式（替代原 serial_comm.unit 原子量）
+    if (unit < 0)
     {
-        unit = serial_comm.unit.load();
+        unit = current_vision_mode();
     }
 
-    // 克隆原图，避免修改原始相机数据
-    cv::Mat result_img = img.clone();
+    // 直接使用原图（process_color 等内部会标注，无需 clone）
+    cv::Mat result_img = img;
 
     // 多模式任务分发
-    switch (unit) {
-        case MODE_COLOR: process_color(result_img); break;
-        case MODE_RING:  process_ring(result_img);  break;
-        case MODE_DOCK:  process_dock(result_img);  break;
-        case MODE_QR:    process_qr(result_img);    break;
+    switch (unit)
+    {
+        case VISION_COLOR: process_color(result_img); break;
+        case VISION_RING:  process_ring(result_img);  break;
+        case VISION_DOCK:  process_dock(result_img);  break;
+        case VISION_QR:    process_qr(result_img);    break;
         default: break;
     }
 
     // 底部状态栏绘制当前工作模式
     const char* mode_text = "UNK";
-    switch (unit) {
-        case MODE_IDLE:  mode_text = "IDLE";  break;
-        case MODE_COLOR: mode_text = "COLOR"; break;
-        case MODE_RING:  mode_text = "RING";  break;
-        case MODE_DOCK:  mode_text = "DOCK";  break;
-        case MODE_QR:    mode_text = "QR";    break;
+    switch (unit)
+    {
+        case VISION_IDLE:  mode_text = "IDLE";  break;
+        case VISION_COLOR: mode_text = "COLOR"; break;
+        case VISION_RING:  mode_text = "RING";  break;
+        case VISION_DOCK:  mode_text = "DOCK";  break;
+        case VISION_QR:    mode_text = "QR";    break;
         default: break;
     }
 

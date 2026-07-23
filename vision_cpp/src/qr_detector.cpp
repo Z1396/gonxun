@@ -18,11 +18,14 @@ QRDetector::QRDetector() = default;
  * @param img 输入图像（BGR）
  * @return 解码字符串；未检测到或图像为空返回 std::nullopt
  */
-std::optional<std::string> QRDetector::detect(cv::Mat& img) {
+std::optional<std::string> QRDetector::detect(cv::Mat& img) 
+{
     if (img.empty())
         return std::nullopt;
 
     cv::Mat points;
+    /*5. 和你代码链路关联
+    相机读到 frame → 丢进 detectAndDecode → 判断返回字符串非空 → 调用你注册的 lambda 回调，把二维码数据抛给上层 UI / 串口。*/
     std::string data = decoder_.detectAndDecode(img, points);
 
     if (data.empty())

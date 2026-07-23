@@ -1,15 +1,16 @@
 /**
  * @file serial_comm.cpp
- * @brief 串口通信模块实现
+ * @brief 串口通信模块实现。
  *
- * 实现串口打开/配置/收发及模拟模式。真实模式使用 POSIX termios 接口，
- * 8N1 格式，非阻塞打开后切换为阻塞读取。模拟模式周期切换工作模式，
- * 发送时仅打印帧内容。
+ * 真实模式使用 POSIX termios 8N1，6 字节帧状态机同步解析。
+ * 模拟模式启动 500ms 后发 match_start=1，后续根据发送的 move/grab 帧
+ * 按预设延迟（move: 300ms+steps*50ms，grab: 800ms）产生对应 done 信号。
  */
 #include "serial_comm.hpp"
 
-#include <cerrno>
+#include <array>
 #include <chrono>
+#include <cerrno>
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
@@ -19,22 +20,9 @@
 
 namespace {
 
-/**
- * @brief 将16位有符号整数拆分为高8位、低8位字节（大端序）
- * @param value 待编码的整数值
- * @return (高字节, 低字节)
- */
-std::pair<uint8_t, uint8_t> pack_word(int value) noexcept {
-    uint16_t v = static_cast<uint16_t>(value);
-    return {static_cast<uint8_t>((v & 0xff00) >> 8),
-            static_cast<uint8_t>(v & 0xff)};
-}
-
-/**
- * @brief 波特率数值转 termios 速度常量
- * @param baud 波特率数值
- * @return 对应的 termios speed_t；不支持的波特率默认返回 B115200
- */
+/// @brief 波特率数值转 termios 速度常量
+/// @param baud 波特率数值
+/// @return 对应的 speed_t；不支持时默认 B115200
 speed_t baud_to_speed(int baud) noexcept {
     switch (baud) {
         case 9600:   return B9600;
@@ -49,40 +37,26 @@ speed_t baud_to_speed(int baud) noexcept {
     }
 }
 
+/// @brief 获取当前时间戳（毫秒）
+/// @return 自 epoch 起的毫秒数
+int64_t now_ms() noexcept {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
 }  // namespace
 
-/**
- * @brief 构造函数，初始化缓冲区和模拟参数
- * @note 发送缓冲区预填帧头，模拟周期序列包含全部5种工作模式
- */
-SerialComm::SerialComm(bool mock, const std::string& port, int baudrate,
-                       uint8_t mock_unit, bool mock_cycle)
+SerialComm::SerialComm(bool mock, const std::string& port, int baudrate) noexcept
     : mock_(mock),
       port_(port),
       baudrate_(baudrate),
-      mock_unit_(mock_unit),
-      mock_cycle_(mock_cycle),
       fd_(-1),
-      receive_(4, 0),
-      send_(15, 0x00),
-      running_(false),
-      mock_cycle_idx_(0) 
-{
-    send_[0] = FRAME_HEADER;
-    mock_cycle_units_ = {MODE_COLOR, MODE_RING, MODE_DOCK, MODE_QR, MODE_IDLE};
-}
+      running_(false) {}
 
-/** @brief 析构，确保串口关闭 */
 SerialComm::~SerialComm() {
     close();
 }
 
-/**
- * @brief 打开并配置真实串口
- * @return 成功返回 true
- * @note 配置 8N1 (8数据位/无校验/1停止位)，禁用流控和回显，
- *       VMIN=0/VTIME=1 实现带超时的阻塞读取
- */
 bool SerialComm::open() {
     fd_ = ::open(port_.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (fd_ < 0) {
@@ -105,23 +79,17 @@ bool SerialComm::open() {
         return false;
     }
 
-    // 设置波特率
     speed_t speed = baud_to_speed(baudrate_);
     cfsetospeed(&tty, speed);
     cfsetispeed(&tty, speed);
 
-    // 8N1: 8数据位, 无校验, 1停止位
+    // 8N1
     tty.c_cflag &= static_cast<tcflag_t>(~(PARENB | CSTOPB | CSIZE));
     tty.c_cflag |= static_cast<tcflag_t>(CS8 | CLOCAL | CREAD);
-
-    // 禁用回显和规范模式
     tty.c_lflag &= static_cast<tcflag_t>(~(ICANON | ECHO | ECHOE | ISIG));
-    // 禁用软件流控和特殊字符处理
     tty.c_iflag &= static_cast<tcflag_t>(~(IXON | IXOFF | IXANY | IGNBRK | BRKINT |
                                            PARMRK | ISTRIP | INLCR | IGNCR | ICRNL));
     tty.c_oflag &= static_cast<tcflag_t>(~OPOST);
-
-    // VMIN=0, VTIME=1: 读取超时 0.1秒
     tty.c_cc[VMIN] = 0;
     tty.c_cc[VTIME] = 1;
 
@@ -133,35 +101,26 @@ bool SerialComm::open() {
     }
 
     tcflush(fd_, TCIFLUSH);
-
     std::cout << "串口已打开: " << port_ << " @ " << baudrate_ << std::endl;
     return true;
 }
 
-/** @brief 停止接收线程并关闭串口文件描述符 */
 void SerialComm::close() {
     running_ = false;
-
     if (thread_.joinable()) {
         thread_.join();
     }
-
     if (fd_ >= 0) {
         ::close(fd_);
         fd_ = -1;
     }
 }
 
-/**
- * @brief 启动串口通信（含接收线程）
- * @note 真实串口打开失败时自动回退到模拟模式
- */
 void SerialComm::start() {
     if (mock_) {
         start_thread();
         return;
     }
-
     if (open()) {
         start_thread();
     } else {
@@ -171,10 +130,8 @@ void SerialComm::start() {
     }
 }
 
-/** @brief 根据当前模式启动对应接收线程 */
 void SerialComm::start_thread() {
     running_ = true;
-
     if (mock_) {
         thread_ = std::thread(&SerialComm::process_mock, this);
     } else {
@@ -182,37 +139,115 @@ void SerialComm::start_thread() {
     }
 }
 
-/**
- * @brief 真实串口接收循环
- * @note 持续读取最多4字节，若帧头为 0x66 则解析 [1]=unit, [2]=unit_target
- */
-void SerialComm::process_real() {
-    uint8_t buf[4];
+// ==== 发送接口 ====
 
+void SerialComm::send_move_frame(uint16_t angle, int16_t steps) {
+    auto frame = gonxun::build_move_frame(angle, steps);
+    transmit(frame.to_bytes());
+    if (mock_) record_mock_send(static_cast<uint8_t>(gonxun::FrameMode::Path),
+                                static_cast<uint8_t>(gonxun::GrabAction::None));
+    // 模拟延迟：steps 为步进电机步数，每格 480 步，每格延迟 50ms
+    if (mock_) {
+        int grid_steps = std::abs(steps) / 480;  // 步进电机步数→格子数
+        int delay_ms = 300 + grid_steps * 50;
+        mock_move_done_at_.store(now_ms() + delay_ms, std::memory_order_relaxed);
+        mock_move_pending_.store(true, std::memory_order_relaxed);
+    }
+}
+
+void SerialComm::send_locate_frame(uint16_t x, uint16_t y, uint8_t grab) {
+    auto frame = gonxun::build_locate_frame(x, y, grab);
+    transmit(frame.to_bytes());
+    if (mock_ && grab == 1) {
+        mock_grab_done_at_.store(now_ms() + 800, std::memory_order_relaxed);
+        mock_grab_pending_.store(true, std::memory_order_relaxed);
+    }
+}
+
+void SerialComm::send_grab_frame() {
+    auto frame = gonxun::build_grab_frame();
+    transmit(frame.to_bytes());
+    if (mock_) {
+        mock_grab_done_at_.store(now_ms() + 800, std::memory_order_relaxed);
+        mock_grab_pending_.store(true, std::memory_order_relaxed);
+    }
+}
+
+void SerialComm::send_raw_frame(const std::vector<uint8_t>& frame) {
+    transmit(frame);
+}
+
+void SerialComm::transmit(const std::vector<uint8_t>& frame) {
+    std::lock_guard<std::mutex> lock(tx_mutex_);
+    if (!mock_ && fd_ >= 0) {
+        ssize_t n = ::write(fd_, frame.data(), frame.size());
+        if (n < 0) {
+            std::cerr << "串口发送失败: " << std::strerror(errno) << std::endl;
+        }
+    } else {
+        std::cout << "[模拟发送] ";
+        for (auto b : frame) {
+            std::cout << std::hex << static_cast<int>(b) << " ";
+        }
+        std::cout << std::dec << std::endl;
+    }
+}
+
+void SerialComm::record_mock_send(uint8_t /*mode*/, uint8_t /*grab*/) noexcept {
+    // 兼容预留：用于扩展其他记录逻辑
+}
+
+// ==== 接收处理 ====
+
+void SerialComm::dispatch_feedback(const gonxun::FeedbackFrame& fb) noexcept {
+    // match_start 锁存：仅在首次收到 match_start=1 时触发回调
+    if (fb.match_start == 1 && !match_started_) {
+        match_started_ = true;
+        std::lock_guard<std::mutex> lock(cb_mutex_);
+        if (match_start_cb_) match_start_cb_(true);
+    }
+
+    // move_done：每次为 1 时触发
+    if (fb.move_done == 1) {
+        std::lock_guard<std::mutex> lock(cb_mutex_);
+        if (move_done_cb_) move_done_cb_();
+    }
+
+    // grab_done：每次为 1 时触发
+    if (fb.grab_done == 1) {
+        std::lock_guard<std::mutex> lock(cb_mutex_);
+        if (grab_done_cb_) grab_done_cb_();
+    }
+}
+
+void SerialComm::process_real() {
+    uint8_t buf[64];
     while (running_) {
         ssize_t n = ::read(fd_, buf, sizeof(buf));
-
         if (n > 0) {
-            std::vector<uint8_t> com_input;
-            com_input.reserve(4);
-
-            for (ssize_t i = 0; i < n && i < 4; ++i) {
-                com_input.push_back(buf[i]);
+            std::lock_guard<std::mutex> lock(rx_mutex_);
+            for (ssize_t i = 0; i < n; ++i) {
+                rx_buf_.push_back(buf[i]);
             }
-
-            // 不足4字节补零
-            while (com_input.size() < 4) {
-                com_input.push_back(0);
-            }
-
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                receive_ = com_input;
-
-                // 帧头校验：[0]=0x66, [1]=工作模式, [2]=目标编号
-                if (receive_[0] == FRAME_HEADER) {
-                    unit.store(receive_[1], std::memory_order_relaxed);
-                    unit_target.store(receive_[2], std::memory_order_relaxed);
+            // 帧同步：扫描 0x66 头，凑够 6 字节尝试解析
+            while (rx_buf_.size() >= gonxun::FB_FRAME_LEN) {
+                if (rx_buf_.front() != gonxun::FRAME_HEADER) {
+                    rx_buf_.pop_front();
+                    continue;
+                }
+                // 取 6 字节尝试解析
+                std::array<uint8_t, gonxun::FB_FRAME_LEN> tmp;
+                std::copy(rx_buf_.begin(), rx_buf_.begin() + gonxun::FB_FRAME_LEN, tmp.begin());
+                auto fb = gonxun::parse_feedback(tmp.data(), tmp.size());
+                if (fb) {
+                    dispatch_feedback(*fb);
+                    // 消费已解析的 6 字节
+                    for (std::size_t i = 0; i < gonxun::FB_FRAME_LEN; ++i) {
+                        rx_buf_.pop_front();
+                    }
+                } else {
+                    // 校验失败：丢弃首字节继续扫描（resync）
+                    rx_buf_.pop_front();
                 }
             }
         } else if (n < 0) {
@@ -222,159 +257,35 @@ void SerialComm::process_real() {
     }
 }
 
-/**
- * @brief 模拟串口接收循环
- * @note 周期模式: 每100ms切换 mock_cycle_units_ 中的下一个模式
- *       固定模式: 始终设置 mock_unit_
- */
 void SerialComm::process_mock() {
+    // 启动 500ms 后发 match_start=1（锁存，仅触发一次）
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    if (!mock_match_sent_.exchange(true)) {
+        std::lock_guard<std::mutex> lock(cb_mutex_);
+        if (match_start_cb_) match_start_cb_(true);
+        match_started_ = true;
+        std::cout << "[模拟] match_start=1" << std::endl;
+    }
+
+    // 持续轮询：检查是否有待触发的 move_done / grab_done
     while (running_) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        int64_t now = now_ms();
 
-        if (mock_cycle_) {
-            uint8_t u = mock_cycle_units_[mock_cycle_idx_];
-            mock_cycle_idx_ = (mock_cycle_idx_ + 1) % mock_cycle_units_.size();
-            unit.store(u, std::memory_order_relaxed);
-        } else {
-            unit.store(mock_unit_, std::memory_order_relaxed);
+        if (mock_move_pending_.load(std::memory_order_relaxed) &&
+            now >= mock_move_done_at_.load(std::memory_order_relaxed)) {
+            mock_move_pending_.store(false, std::memory_order_relaxed);
+            std::lock_guard<std::mutex> lock(cb_mutex_);
+            if (move_done_cb_) move_done_cb_();
+            std::cout << "[模拟] move_done=1" << std::endl;
+        }
+
+        if (mock_grab_pending_.load(std::memory_order_relaxed) &&
+            now >= mock_grab_done_at_.load(std::memory_order_relaxed)) {
+            mock_grab_pending_.store(false, std::memory_order_relaxed);
+            std::lock_guard<std::mutex> lock(cb_mutex_);
+            if (grab_done_cb_) grab_done_cb_();
+            std::cout << "[模拟] grab_done=1" << std::endl;
         }
     }
-}
-
-/**
- * @brief 构建发送帧
- * @param cmd 命令字节
- * @param data_bytes 数据域字节（最多12字节）
- * @note 帧格式: [HEADER][CMD][DATA×12][CHECKSUM][TAIL]
- *       校验和 = (cmd + data[0..11]) 累加和 & 0xFF
- */
-void SerialComm::build_frame(uint8_t cmd, const std::vector<uint8_t>& data_bytes) {
-    send_.assign(15, 0x00);
-
-    send_[0] = FRAME_HEADER;
-    send_[1] = cmd;
-
-    for (std::size_t i = 0; i < FRAME_DATA_LEN && i < data_bytes.size(); ++i) {
-        send_[2 + i] = data_bytes[i];
-    }
-
-    // 计算校验和: cmd + data 累加
-    uint8_t checksum = 0;
-    for (std::size_t i = 1; i < FRAME_CHECKSUM_IDX; ++i) {
-        checksum = static_cast<uint8_t>(checksum + send_[i]);
-    }
-
-    send_[FRAME_CHECKSUM_IDX] = checksum;
-    send_[FRAME_TAIL_IDX] = FRAME_TAIL;
-}
-
-/**
- * @brief 发送坐标数据帧
- * @param cmd 命令字节
- * @param coords 坐标列表
- * @note CMD_COLOR: 3组(x,y)共12字节，每组4字节(x高+x低+y高+y低)
- *       CMD_RING/CMD_DOCK: 6字节 = (x2高,x2低,y2高,y2低,y1-y3高,y1-y3低)
- */
-void SerialComm::send_coordinates(uint8_t cmd,
-                                  const std::vector<std::pair<int, int>>& coords) {
-    std::vector<uint8_t> data(FRAME_DATA_LEN, 0x00);
-
-    if (cmd == CMD_COLOR) {
-        // 颜色模式: 编码3组坐标 (x,y) 各16位大端
-        if (coords.size() >= 3) {
-            for (std::size_t i = 0; i < 3; ++i) {
-                auto xh = pack_word(coords[i].first);
-                auto yh = pack_word(coords[i].second);
-
-                data[i * 4 + 0] = xh.first;
-                data[i * 4 + 1] = xh.second;
-                data[i * 4 + 2] = yh.first;
-                data[i * 4 + 3] = yh.second;
-            }
-        }
-    } else if (cmd == CMD_RING || cmd == CMD_DOCK) {
-        // 圆环/对接模式: 编码中间圆心(x2,y2)和左右y差值(y1-y3)
-        if (coords.size() >= 3) {
-            int x2 = coords[1].first;
-            int y2 = coords[1].second;
-            int y1 = coords[0].second;
-            int y3 = coords[2].second;
-
-            auto p = pack_word(x2);
-            data[0] = p.first;
-            data[1] = p.second;
-
-            p = pack_word(y2);
-            data[2] = p.first;
-            data[3] = p.second;
-
-            p = pack_word(y1 - y3);
-            data[4] = p.first;
-            data[5] = p.second;
-        }
-    }
-
-    std::vector<uint8_t> frame;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        build_frame(cmd, data);
-        frame = send_;
-    }
-
-    transmit(frame);
-}
-
-/**
- * @brief 发送二维码数据帧
- * @param qr_data QR码字符串，逐字节写入数据域，截断至12字节
- */
-void SerialComm::send_qr_data(const std::string& qr_data) {
-    std::vector<uint8_t> data(FRAME_DATA_LEN, 0x00);
-
-    std::size_t len = qr_data.size();
-    if (len > FRAME_DATA_LEN) {
-        len = FRAME_DATA_LEN;
-    }
-
-    for (std::size_t i = 0; i < len; ++i) {
-        data[i] = static_cast<uint8_t>(qr_data[i]);
-    }
-
-    std::vector<uint8_t> frame;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        build_frame(CMD_QR, data);
-        frame = send_;
-    }
-
-    transmit(frame);
-}
-
-/**
- * @brief 发送帧到串口或模拟输出
- * @param frame 完整帧字节数组
- * @note 模拟模式下打印帧的十进制内容到标准输出
- */
-void SerialComm::transmit(const std::vector<uint8_t>& frame) {
-    if (!mock_ && fd_ >= 0) {
-        ssize_t n = ::write(fd_, frame.data(), frame.size());
-        if (n < 0) {
-            std::cerr << "串口发送失败: " << std::strerror(errno) << std::endl;
-        }
-    } else {
-        std::cout << "[模拟] 发送数据: [";
-        for (std::size_t i = 0; i < frame.size(); ++i) {
-            if (i > 0) std::cout << ", ";
-            std::cout << static_cast<int>(frame[i]);
-        }
-        std::cout << "]" << std::endl;
-    }
-}
-
-/**
- * @brief 直接发送原始帧数据
- * @param frame 完整帧字节数组
- */
-void SerialComm::send_raw_frame(const std::vector<uint8_t>& frame) {
-    transmit(frame);
 }

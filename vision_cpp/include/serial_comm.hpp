@@ -1,151 +1,139 @@
 /**
  * @file serial_comm.hpp
- * @brief 串口通信模块，支持真实硬件串口和模拟模式
+ * @brief 串口通信模块，支持真实硬件串口和模拟模式。
  *
- * 负责上位机（Jetson）与下位机（STM32）之间的串口通信。
- * 接收端持续读取下位机的工作模式字节，发送端按协议帧格式
- * 将坐标/QR数据打包后写入串口。模拟模式下自动周期切换工作模式。
+ * 负责上位机与下位机之间的统一串口通信：
+ *  - 发送端按 12 字节 CommandFrame 协议打包指令（移动/定位/抓取）
+ *  - 接收端解析 6 字节 FeedbackFrame，派发 match_start/move_done/grab_done 事件
+ *  - 模拟模式下自动生成 done 信号以支持 stop-and-wait 队列机制调试
  *
- * 帧格式 (15字节):
- *   [0]      帧头 0x66
- *   [1]      命令字节
- *   [2..13]  数据域 (12字节)
- *   [14]     校验和 (cmd + data 累加和 & 0xFF)
- *   [15]     帧尾 0x77
+ * 协议格式详见 motion_protocol.hpp。
  */
 #pragma once
+
+#include "motion_protocol.hpp"
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
-#include <utility>
 #include <vector>
 
-// ==== 帧格式常量 ====
-constexpr uint8_t FRAME_HEADER = 0x66;  ///< 帧头标识字节
-constexpr uint8_t FRAME_TAIL = 0x77;    ///< 帧尾标识字节
-
-// ==== 帧结构索引 ====
-constexpr std::size_t FRAME_DATA_LEN = 12;      ///< 数据域长度 (字节)
-constexpr std::size_t FRAME_CHECKSUM_IDX = 13;  ///< 校验和在帧中的下标
-constexpr std::size_t FRAME_TAIL_IDX = 14;      ///< 帧尾在帧中的下标
-
-// ==== 工作模式（下位机下发） ====
-constexpr uint8_t MODE_IDLE = 0;  ///< 空闲模式
-constexpr uint8_t MODE_COLOR = 1; ///< 颜色识别模式
-constexpr uint8_t MODE_RING = 3;  ///< 圆环检测模式
-constexpr uint8_t MODE_DOCK = 4;  ///< 对接停靠模式
-constexpr uint8_t MODE_QR = 9;    ///< 二维码扫描模式
-
-// ==== 命令字节（上位机下发） ====
-constexpr uint8_t CMD_COLOR = 0x01; ///< 颜色坐标命令
-constexpr uint8_t CMD_RING = 0x03;  ///< 圆环坐标命令
-constexpr uint8_t CMD_DOCK = 0x04;  ///< 对接坐标命令
-constexpr uint8_t CMD_QR = 0x09;    ///< QR数据命令
-
-/**
- * @brief 串口通信类，支持真实串口和模拟模式
- *
- * 接收线程持续读取串口数据并解析工作模式；发送函数按帧协议
- * 打包数据后写入串口。模拟模式下接收线程自动周期切换工作模式，
- * 发送函数仅打印帧内容到标准输出。
- */
+/// @brief 串口通信类，支持真实串口和模拟模式。
+///
+/// 接收线程持续解析 6 字节 FeedbackFrame；解析成功后通过
+/// 注册的回调通知上层（match_start 仅触发一次，move_done/grab_done 每次边沿触发）。
+/// 模拟模式下根据发送的指令按预设延迟自动产生对应 done 信号。
 class SerialComm {
 public:
-    /**
-     * @brief 构造串口通信对象
-     * @param mock 是否使用模拟模式（默认 true）
-     * @param port 串口设备路径，如 "/dev/ttyCH341USB0"
-     * @param baudrate 波特率，默认 115200
-     * @param mock_unit 模拟模式下固定的工作模式字节
-     * @param mock_cycle 模拟模式下是否周期切换工作模式
-     */
+    /// @brief 比赛开始回调签名（参数为 true 表示收到 match_start=1）
+    using MatchStartCallback = std::function<void(bool)>;
+    /// @brief 走路完成回调签名
+    using MoveDoneCallback = std::function<void()>;
+    /// @brief 抓取完成回调签名
+    using GrabDoneCallback = std::function<void()>;
+
+    /// @brief 构造串口通信对象
+    /// @param mock 是否使用模拟模式
+    /// @param port 串口设备路径
+    /// @param baudrate 波特率
     explicit SerialComm(bool mock = true,
                         const std::string& port = "/dev/ttyCH341USB0",
-                        int baudrate = 115200,
-                        uint8_t mock_unit = MODE_IDLE,
-                        bool mock_cycle = false);
+                        int baudrate = 115200) noexcept;
     ~SerialComm();
 
     SerialComm(const SerialComm&) = delete;
     SerialComm& operator=(const SerialComm&) = delete;
 
-    /**
-     * @brief 打开真实串口设备
-     * @return 打开成功返回 true，失败返回 false
-     * @note 仅打开串口，不启动接收线程
-     */
+    /// @brief 打开真实串口设备
+    /// @return 打开成功返回 true
     [[nodiscard]] bool open();
 
-    /** @brief 关闭串口并停止接收线程 */
+    /// @brief 关闭串口并停止接收线程
     void close();
 
-    /**
-     * @brief 启动串口通信（含接收线程）
-     * @note 若真实串口打开失败，自动回退到模拟模式
-     */
+    /// @brief 启动串口通信（含接收线程）。真实串口打开失败时回退模拟模式。
     void start();
 
-    /**
-     * @brief 发送坐标数据帧
-     * @param cmd 命令字节 (CMD_COLOR / CMD_RING / CMD_DOCK)
-     * @param coords 坐标列表，每对为 (x, y)
-     * @note CMD_COLOR 编码3组(x,y)；CMD_RING/CMD_DOCK 编码中间圆心(x2,y2)和y差值
-     */
-    void send_coordinates(uint8_t cmd, const std::vector<std::pair<int, int>>& coords);
+    // ==== 发送接口 ====
 
-    /**
-     * @brief 发送二维码数据帧
-     * @param qr_data QR码字符串，截断至 FRAME_DATA_LEN 字节
-     */
-    void send_qr_data(const std::string& qr_data);
+    /// @brief 发送路径规划移动帧（mode=Path, grab=0）
+    /// @param angle 移动角度 0/90/180/270（真实值）
+    /// @param steps 步数（带符号）
+    void send_move_frame(uint16_t angle, int16_t steps);
 
-    /**
-     * @brief 直接发送原始帧数据
-     * @param frame 完整帧字节数组
-     */
+    /// @brief 发送视觉定位帧（mode=Locate）
+    /// @param x 物料 X 坐标 (mm)
+    /// @param y 物料 Y 坐标 (mm)
+    /// @param grab 抓取指令 0/1
+    void send_locate_frame(uint16_t x, uint16_t y, uint8_t grab);
+
+    /// @brief 发送纯抓取帧（mode=Path, steps=0, grab=1）
+    void send_grab_frame();
+
+    /// @brief 直接发送原始帧字节（测试用）
+    /// @param frame 完整 12 字节帧
     void send_raw_frame(const std::vector<uint8_t>& frame);
 
-    std::atomic<uint8_t> unit{MODE_IDLE};       ///< 当前工作模式（原子读取）
-    std::atomic<uint8_t> unit_target{0};         ///< 当前目标编号（原子读取）
+    // ==== 回调注册 ====
+
+    /// @brief 注册比赛开始回调（仅触发一次）
+    void set_match_start_callback(MatchStartCallback cb) noexcept {
+        match_start_cb_ = std::move(cb);
+    }
+    /// @brief 注册走路完成回调
+    void set_move_done_callback(MoveDoneCallback cb) noexcept {
+        move_done_cb_ = std::move(cb);
+    }
+    /// @brief 注册抓取完成回调
+    void set_grab_done_callback(GrabDoneCallback cb) noexcept {
+        grab_done_cb_ = std::move(cb);
+    }
 
 private:
-    /** @brief 真实串口接收循环，解析4字节帧头+模式+目标 */
+    /// @brief 真实串口接收循环：6 字节帧同步解析
     void process_real();
-    /** @brief 模拟串口接收循环，周期或固定设置 unit */
+    /// @brief 模拟串口接收循环：根据发送记录产生 done 信号
     void process_mock();
-    /** @brief 根据模式启动对应接收线程 */
+    /// @brief 根据当前模式启动对应接收线程
     void start_thread();
-    /**
-     * @brief 构建发送帧
-     * @param cmd 命令字节
-     * @param data_bytes 数据域字节
-     * @note 帧格式: [HEADER][CMD][DATA×12][CHECKSUM][TAIL]
-     */
-    void build_frame(uint8_t cmd, const std::vector<uint8_t>& data_bytes);
-    /**
-     * @brief 发送帧数据到串口或模拟输出
-     * @param frame 完整帧字节数组
-     */
+    /// @brief 发送帧字节到串口或模拟输出
+    /// @param frame 完整帧字节数组
     void transmit(const std::vector<uint8_t>& frame);
+    /// @brief 解析接收缓冲区中的完整帧并派发事件
+    void dispatch_feedback(const gonxun::FeedbackFrame& fb) noexcept;
+    /// @brief 模拟模式下记录发送事件，触发后续 done 信号生成
+    void record_mock_send(uint8_t mode, uint8_t grab) noexcept;
 
-    bool mock_;                 ///< 是否模拟模式
-    std::string port_;          ///< 串口设备路径
-    int baudrate_;              ///< 波特率
-    uint8_t mock_unit_;         ///< 模拟固定模式字节
-    bool mock_cycle_;           ///< 模拟周期切换开关
+    bool mock_;                       ///< 是否模拟模式
+    std::string port_;                ///< 串口设备路径
+    int baudrate_;                    ///< 波特率
 
-    int fd_;                    ///< 串口文件描述符，-1 表示未打开
-    std::vector<uint8_t> receive_; ///< 接收缓冲区 (4字节)
-    std::vector<uint8_t> send_;    ///< 发送帧缓冲区 (15字节)
+    int fd_;                          ///< 串口文件描述符，-1 表示未打开
+    std::deque<uint8_t> rx_buf_;      ///< 接收缓冲区
+    std::mutex rx_mutex_;             ///< 接收缓冲区互斥锁
 
-    std::thread thread_;        ///< 接收线程
-    std::atomic<bool> running_; ///< 线程运行标志
-    std::mutex mutex_;          ///< 收发缓冲区互斥锁
+    std::thread thread_;              ///< 接收线程
+    std::atomic<bool> running_;       ///< 线程运行标志
+    std::mutex tx_mutex_;             ///< 发送互斥锁
 
-    std::vector<uint8_t> mock_cycle_units_; ///< 模拟周期模式序列
-    std::size_t mock_cycle_idx_;            ///< 模拟周期当前下标
+    // 比赛开始锁存标志
+    bool match_started_ = false;      ///< 是否已收到 match_start（仅触发一次）
+
+    // 三个事件回调
+    MatchStartCallback match_start_cb_;
+    MoveDoneCallback move_done_cb_;
+    GrabDoneCallback grab_done_cb_;
+    std::mutex cb_mutex_;             ///< 回调互斥锁
+
+    // 模拟模式状态
+    std::atomic<bool> mock_match_sent_{false};     ///< 是否已发过 match_start
+    std::atomic<int64_t> mock_move_done_at_{0};    ///< 预定 move_done 触发的时刻 (ms)
+    std::atomic<int64_t> mock_grab_done_at_{0};    ///< 预定 grab_done 触发的时刻 (ms)
+    std::atomic<bool> mock_move_pending_{false};   ///< 是否有待触发的 move_done
+    std::atomic<bool> mock_grab_pending_{false};   ///< 是否有待触发的 grab_done
 };

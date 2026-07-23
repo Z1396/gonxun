@@ -1,89 +1,95 @@
 /// @file mainwindow.hpp
-/// @brief 主窗口类声明，集成赛场地图、数据面板、仿真控制器与运动控制器。
+/// @brief 主窗口类声明，集成赛场地图、仿真控制器与运动控制器。
 ///        负责顶层UI布局、工具栏按钮管理以及各子模块间的信号槽协调。
-///        用户通过此窗口完成障碍物标记、启停区选择、路径预览与仿真启停等操作。
+///        用户通过此窗口完成障碍物标记、启停区选择与仿真启停等操作。
 
 #pragma once
 
 #include "courtmapwidget.hpp"
-#include "data_panel_widget.hpp"
 #include "serial_comm.hpp"
 #include "simulation_controller.hpp"
 
 #include <QLabel>
 #include <QMainWindow>
 #include <QPushButton>
+#include <QImage>
 
 class MotionController;
+class VisionSystem;
 
-/// @brief 应用程序主窗口，组合地图控件、数据面板、仿真与运动控制器。
-///
-/// 顶层布局为：顶部工具栏（标记/启停区/开始/仿真/路径预览按钮 + 状态标签）
-/// + 中央 QSplitter（左侧地图 3:1 右侧数据面板）。
-/// 按钮互斥逻辑：标记模式与启停区选择不可同时激活。
+/// @brief 应用程序主窗口，组合地图控件、仿真与运动控制器。
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
 
 public:
-    /// @brief 构造主窗口，初始化所有子控件、串口通信与信号槽连接。
-    /// @param parent 父控件指针，默认 nullptr
-    explicit MainWindow(QWidget *parent = nullptr) noexcept;
-
-    /// @brief 析构主窗口，释放 serial_comm_ 资源。
+    /// @brief 构造主窗口，绑定外部串口实例与视觉系统。
+    /// @param serial_comm 外部注入的串口实例（与 VisionSystem 共享）
+    /// @param vision_system 外部注入的视觉系统（用于取物料坐标、设置视觉模式）
+    /// @param parent 父控件
+    explicit MainWindow(SerialComm& serial_comm, VisionSystem& vision_system,
+                         QWidget* parent = nullptr) noexcept;
     ~MainWindow() override;
 
 signals:
+    /// @brief 二维码扫描完成信号
+    void qr_code_scanned(const QString& task_code);
+
     /// @brief 用户点击"开始"按钮时发射，请求启动视觉系统。
     void vision_start_requested();
 
     /// @brief 用户点击"停止"按钮时发射，请求停止视觉系统。
     void vision_stop_requested();
 
+    /// @brief 模式切换信号（手动覆写视觉系统工作模式）
+    /// @param mode 视觉模式常量 (VISION_COLOR/RING/QR)
+    /// @param manual true=手动覆写开启, false=回到自动模式
+    void mode_switch_requested(int mode, bool manual);
+
+    /// @brief 比赛开始（收到下位机 match_start=1）信号
+    void match_started();
+
 private slots:
-    /// @brief 标记障碍物按钮点击槽，切换地图标记模式并互斥取消启停区选择。
     void on_mark_button_clicked();
-
-    /// @brief 障碍物标记状态变更槽，刷新状态栏显示。
-    /// @param id 障碍物编号
-    /// @param marked 是否已标记
     void on_obstacle_toggled(int id, bool marked);
-
-    /// @brief 选择启停区按钮点击槽，切换启停区可选模式并互斥取消标记模式。
     void on_select_start_zone_clicked();
-
-    /// @brief 启停区选择完成槽，显示选中区域信息并退出选择模式。
-    /// @param zone_index 启停区索引（0=右上角，1=右下角）
-    /// @param zone_name 启停区名称
     void on_start_zone_selected(int zone_index, const QString &zone_name);
-
-    /// @brief 开始/停止按钮点击槽，切换视觉系统启停状态。
     void on_start_button_clicked();
-
-    /// @brief 仿真按钮点击槽，启动或停止仿真控制器。
     void on_sim_button_clicked();
+    void on_mode_button_clicked();
+    void on_qr_code_scanned(const QString& task_code);
 
-    /// @brief 路径预览按钮点击槽，生成并显示完整任务路径预览。
-    void on_path_preview_clicked();
+    /// @brief 收到下位机比赛开始信号（由 SerialComm 回调跨线程 invoke）
+    void on_match_started();
+
+public slots:
+    void on_frame_ready(const QImage& frame);
+    void on_qr_frame_ready(const QImage& frame);
 
 private:
-    /// @brief 根据当前系统状态更新状态栏文本与颜色。
-    ///        优先级：仿真运行 > 视觉运行 > 标记模式 > 启停区已选 > 默认。
-    void update_status();
+    /// @brief 检查自动启动条件（启停区+任务码+比赛开始），满足则启动仿真。
+    void try_auto_start_mission();
 
-private:
-    CourtMapWidget *court_map_ = nullptr;       ///< 赛场地图绘制控件
-    DataPanelWidget *data_panel_ = nullptr;     ///< 右侧数据面板控件
-    SimulationController *sim_controller_ = nullptr; ///< 仿真控制器
-    SerialComm *serial_comm_ = nullptr;         ///< 串口通信实例
-    MotionController *motion_controller_ = nullptr;  ///< 运动控制器
+    CourtMapWidget *court_map_ = nullptr;
+    SimulationController *sim_controller_ = nullptr;
+    SerialComm *serial_comm_ = nullptr;          ///< 外部注入，不拥有
+    MotionController *motion_controller_ = nullptr;
+    VisionSystem *vision_system_ = nullptr;      ///< 外部注入，不拥有
 
-    QPushButton *mark_btn_ = nullptr;           ///< 标记障碍物切换按钮
-    QPushButton *select_start_btn_ = nullptr;   ///< 选择启停区切换按钮
-    QPushButton *start_btn_ = nullptr;          ///< 开始/停止视觉系统按钮
-    QPushButton *sim_btn_ = nullptr;            ///< 仿真启停按钮
-    QPushButton *path_preview_btn_ = nullptr;   ///< 路径预览按钮
-    QLabel *status_label_ = nullptr;            ///< 状态提示标签
+    QPushButton *mark_btn_ = nullptr;
+    QPushButton *select_start_btn_ = nullptr;
+    QPushButton *start_btn_ = nullptr;
+    QPushButton *sim_btn_ = nullptr;
+    QPushButton *color_btn_ = nullptr;
+    QPushButton *ring_btn_ = nullptr;
+    QPushButton *qr_btn_ = nullptr;
 
-    bool vision_running_ = false;               ///< 视觉系统是否正在运行
+    QLabel *main_camera_label_ = nullptr;
+    QLabel *qr_camera_label_ = nullptr;
+
+    bool vision_running_ = false;
+    bool has_start_zone_ = false;     ///< 是否已选择启停区
+    bool has_task_code_ = false;      ///< 是否已扫码得到任务码
+    bool match_started_ = false;      ///< 是否已收到比赛开始信号
+    QString task_code_;              ///< 缓存任务码
 };

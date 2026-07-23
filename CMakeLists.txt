@@ -144,9 +144,8 @@ endif()
 # 存放：共享内存、配置读取
 add_library(gonxun_core SHARED
     core/src/app_signals.cpp
-    core/src/cli_parser.cpp
+    core/src/logger.cpp
     core/src/vision_controller.cpp
-    core/src/astar_planner.cpp
     core/src/task_state_machine.cpp
     core/src/grid5_path_planner.cpp
     config/src/config_loader.cpp
@@ -249,12 +248,11 @@ if(QT_AVAILABLE)
     set(CMAKE_AUTORCC ON)
     set(CMAKE_AUTOUIC ON)
 
-    # GUI源码：主函数、主窗口、画布控件、数据面板、仿真控制器
+    # GUI源码：主函数、主窗口、画布控件、仿真控制器
     set(GUI_SOURCES
         main.cpp
         gui/src/mainwindow.cpp
         gui/src/courtmapwidget.cpp
-        gui/src/data_panel_widget.cpp
         gui/src/simulation_controller.cpp
         gui/src/motion_controller.cpp
         gui/src/touchhandler.cpp
@@ -264,7 +262,6 @@ if(QT_AVAILABLE)
     set(GUI_HEADERS
         gui/include/mainwindow.hpp
         gui/include/courtmapwidget.hpp
-        gui/include/data_panel_widget.hpp
         gui/include/simulation_controller.hpp
         gui/include/motion_controller.hpp
         gui/include/touchhandler.hpp

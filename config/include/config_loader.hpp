@@ -52,15 +52,23 @@ struct Config {
     struct {
         /// 主相机配置
         struct {
-            int index{1};        ///< 设备索引号
-            int width{640};      ///< 分辨率宽度
-            int height{480};     ///< 分辨率高度
+            int index{1};            ///< 设备索引号
+            int width{640};          ///< 分辨率宽度
+            int height{480};         ///< 分辨率高度
+            int buffer_size{1};      ///< 缓冲区大小（帧数）
+            int auto_exposure{1};    ///< 自动曝光 (0=关闭, 1=开启)
+            int exposure{120};       ///< 曝光值
+            int gain{15};            ///< 增益值
         } main;
         /// QR 扫码相机配置
         struct {
-            int index{2};        ///< 设备索引号
-            int width{640};      ///< 分辨率宽度
-            int height{480};     ///< 分辨率高度
+            int index{2};            ///< 设备索引号
+            int width{640};          ///< 分辨率宽度
+            int height{480};         ///< 分辨率高度
+            int buffer_size{1};      ///< 缓冲区大小（帧数）
+            int auto_exposure{1};    ///< 自动曝光 (0=关闭, 1=开启)
+            int exposure{120};       ///< 曝光值
+            int gain{15};            ///< 增益值
         } qr;
     } camera;
 
@@ -130,6 +138,8 @@ public:
 
     /// 获取当前配置的常量引用
     [[nodiscard]] const Config& config() const { return config_; }
+    /// 获取当前配置的可修改引用（用于命令行参数覆盖）
+    [[nodiscard]] Config& config() { return config_; }
 
     /// 判断配置是否已成功加载
     [[nodiscard]] bool is_loaded() const { return loaded_; }

@@ -15,11 +15,17 @@
 CourtMapWidget::CourtMapWidget(QWidget *parent) noexcept
     : QWidget(parent)
 {
+    // 启用触摸事件与鼠标追踪
     setAttribute(Qt::WA_AcceptTouchEvents, true);
+    // 启用鼠标追踪
     setMouseTracking(true);
+    // 设置控件最小尺寸
     setMinimumSize(500, 500);
+    // 初始化地图数据
     init_map_data();
+    // 初始化障碍物数据
     init_obstacles();
+    // 初始化5×5格子网格
     init_grid5();
 }
 
@@ -111,8 +117,10 @@ void CourtMapWidget::init_grid5()
 /// @brief 设置标记模式：开启时光标变为十字，关闭时恢复箭头。
 void CourtMapWidget::set_mark_mode(bool enabled)
 {
+    // 更新标记模式状态
     mark_mode_ = enabled;
-    setCursor(enabled ? Qt::CrossCursor : Qt::ArrowCursor);
+    // 更新鼠标光标
+    setCursor(enabled ? Qt::CrossCursor : Qt::ArrowCursor);  
     update();
 }
 
@@ -155,11 +163,12 @@ void CourtMapWidget::paintEvent(QPaintEvent *event)
     p.setRenderHint(QPainter::Antialiasing);
     p.setRenderHint(QPainter::TextAntialiasing);
 
-    // 计算缩放：保持赛场正方形等比缩放，居中显示
+    // 计算缩放：保持赛场正方形等比缩放，顶部留空间给任务码
     int w = width(), h = height();
-    scale_ = qMin((w - 2*MARGIN) / MAP_SIZE, (h - 2*MARGIN) / MAP_SIZE);
+    scale_ = qMin((w - 2*MARGIN) / MAP_SIZE, (h - MARGIN_TOP - MARGIN) / MAP_SIZE) * scale_factor_;
     qreal draw_w = MAP_SIZE * scale_, draw_h = MAP_SIZE * scale_;
-    map_rect_ = QRectF((w - draw_w) / 2, (h - draw_h) / 2, draw_w, draw_h);
+    // 地图水平居中，垂直方向顶部留出 MARGIN_TOP 空间
+    map_rect_ = QRectF((w - draw_w) / 2, MARGIN_TOP, draw_w, draw_h);
 
     // 按层次绘制各赛场元素
     draw_background(p);
@@ -176,6 +185,7 @@ void CourtMapWidget::paintEvent(QPaintEvent *event)
     draw_path(p);
     draw_robot(p);
     draw_dimension_marks(p);
+    draw_task_code(p);
 }
 
 /// @brief 绘制白色控件背景与灰色赛场底色。
@@ -497,8 +507,7 @@ void CourtMapWidget::handle_point_selection(const QPointF &pos)
             selected_start_zone_ = idx;
             QRectF zone_rect = zones_[idx].rect;
             robot_pos_ = zone_rect.center();
-            // 朝向：右上角启停区朝225°，右下角朝315°（指向赛场中心）
-            robot_angle_ = (idx == 0) ? 225.0 : 315.0;
+            robot_angle_ = 90.0;  // 90°=向下
             robot_visible_ = true;
             emit start_zone_selected(idx, zones_[idx].name);
             update();
@@ -570,7 +579,7 @@ void CourtMapWidget::draw_robot(QPainter &p)
 
     QPointF center = map_to_widget(robot_pos_);
     p.translate(center);
-    p.rotate(-robot_angle_);
+    p.rotate(-robot_angle_);  // 逆时针：0=左, 90=下, 180=右, 270=上
 
     // 机器人方体
     qreal body_w = 300 * scale_;
@@ -583,19 +592,19 @@ void CourtMapWidget::draw_robot(QPainter &p)
     p.setBrush(QColor(241, 196, 15));
     p.drawRoundedRect(body_rect, 8, 8);
 
-    // 四轮（左前、右前、左后、右后）
+    // 四轮
     p.setBrush(QColor(30, 30, 30));
     p.drawRoundedRect(QRectF(-body_w/2 - wheel_w/2, -body_h/2 + 10*scale_, wheel_w, wheel_h), 3, 3);
     p.drawRoundedRect(QRectF(body_w/2 - wheel_w/2, -body_h/2 + 10*scale_, wheel_w, wheel_h), 3, 3);
     p.drawRoundedRect(QRectF(-body_w/2 - wheel_w/2, body_h/2 - 10*scale_ - wheel_h, wheel_w, wheel_h), 3, 3);
     p.drawRoundedRect(QRectF(body_w/2 - wheel_w/2, body_h/2 - 10*scale_ - wheel_h, wheel_w, wheel_h), 3, 3);
 
-    // 方向箭头（红色三角形，指示前进方向）
+    // 方向箭头（默认指向左，rotate 后：0°=左, 90°=下, 180°=右, 270°=上）
     QPainterPath arrow;
     qreal arrow_size = body_w * 0.25;
-    arrow.moveTo(0, -body_h/2 + 15*scale_);
-    arrow.lineTo(-arrow_size/2, -body_h/2 + 15*scale_ + arrow_size);
-    arrow.lineTo(arrow_size/2, -body_h/2 + 15*scale_ + arrow_size);
+    arrow.moveTo(-body_w/2 + 15*scale_, 0);
+    arrow.lineTo(-body_w/2 + 15*scale_ + arrow_size, -arrow_size/2);
+    arrow.lineTo(-body_w/2 + 15*scale_ + arrow_size, arrow_size/2);
     arrow.closeSubpath();
     p.setBrush(QColor(231, 76, 60));
     p.setPen(QPen(QColor(192, 57, 43), 1));
@@ -774,4 +783,40 @@ void CourtMapWidget::draw_grid5(QPainter &p)
     }
 
     p.restore();
+}
+
+/// @brief 设置任务码，触发重绘。
+void CourtMapWidget::set_task_code(const QString& task_code)
+{
+    task_code_ = task_code;
+    update();
+}
+
+/// @brief 绘制任务码显示（地图顶部居中）。
+///        字体高度≥12mm（约36pt），白底黑字。
+void CourtMapWidget::draw_task_code(QPainter& p)
+{
+    if (task_code_.isEmpty()) return;
+
+    // 字体设置：40pt粗体（字体高度约14mm，满足≥12mm要求）
+    QFont font("Microsoft YaHei", 42, QFont::Bold);
+    p.setFont(font);
+
+    // 计算文本位置：控件顶部居中
+    QFontMetrics fm(font);
+    QRect text_rect = fm.boundingRect(task_code_);
+    int text_width = text_rect.width();
+    int text_height = text_rect.height();
+
+    // 位置：控件顶部居中，留少量边距
+    int x = static_cast<int>(((width() - text_width) / 2) - 0);
+    int y = -30;  // 顶部边距5px
+
+    // 绘制白色背景
+    QRect bg_rect(x - 10, y - 5, text_width + 20, text_height + 10);
+    p.fillRect(bg_rect, Qt::white);
+
+    // 绘制黑色文本
+    p.setPen(Qt::black);
+    p.drawText(x, y + text_height - 5, task_code_);
 }
