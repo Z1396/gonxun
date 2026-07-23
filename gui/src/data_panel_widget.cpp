@@ -1,217 +1,235 @@
-/**
- * @file data_panel_widget.cpp
- * @brief 数据面板控件实现文件
- * 
- * @details 本文件实现了主窗口右侧的数据面板控件。
- *          核心功能：
- *          - 显示机器人坐标（X, Y, 朝向角度）
- *          - 显示任务信息（任务码、状态、循环进度、物料进度）
- *          - 定时刷新机制（200ms 间隔）
- *          - 动态样式管理（正常/高亮/闪烁）
- *          
- *          UI组件结构：
- *          - 机器人坐标组：X轴、Y轴、朝向角度
- *          - 任务信息组：任务码、当前状态、任务循环、物料进度
- *          - 使用 QGridLayout 实现标签-值对齐布局
- *          
- *          数据更新机制：
- *          - 定时器触发 refreshAll() 刷新所有数据
- *          - 外部调用 updateRobotPose() 更新机器人坐标
- *          - 外部调用 updateTaskState() 更新任务状态
- *          - 外部调用 updateTaskProgress() 更新任务进度
- *          
- * @see data_panel_widget.h 头文件定义
- * @see mainwindow.cpp 使用此控件的主窗口
- * 
- * @author 工创赛2025智能物流搬运系统团队
- * @date 2024-01-15
- * @version 1.0.0
- * @history 2024-01-15 初始版本
- * 
- * @copyright 工创赛2025智能物流搬运系统
- */
-#include "data_panel_widget.h"
+/// @file data_panel_widget.cpp
+/// @brief 数据面板控件实现，包含任务码显示、机器人坐标与任务信息。
+///        任务码字体高度≥12mm（约45px），白底黑字，简洁清晰。
+
+#include "data_panel_widget.hpp"
+
 #include <QDateTime>
 
-/**
- * @brief DataPanelWidget 构造函数
- * 
- * @details 初始化数据面板控件，完成以下工作：
- *          1. 设置样式表（标签、值、分组框）
- *          2. 搭建 UI 界面（机器人坐标组 + 任务信息组）
- *          3. 创建定时刷新定时器（200ms 间隔）
- *          
- * @param parent 父窗口对象（默认 nullptr）
- */
-DataPanelWidget::DataPanelWidget(QWidget *parent)
+/// @brief 构造数据面板。
+DataPanelWidget::DataPanelWidget(QWidget *parent) noexcept
     : QWidget(parent)
 {
-    // 初始化样式表
-    setupStyles();
-    // 搭建 UI 界面
-    setupUI();
-
-    // ==================== 定时刷新定时器 ====================
-    // 刷新间隔：200ms（实时性较高）
-    m_refreshTimer = new QTimer(this);
-    m_refreshTimer->setInterval(200);
-    connect(m_refreshTimer, &QTimer::timeout, this, &DataPanelWidget::refreshAll);
-    m_refreshTimer->start();
+    setup_styles();
+    setup_ui();
 }
 
-/**
- * @brief 初始化样式表
- * 
- * @details 定义各类标签、分组框的样式字符串，用于统一界面外观。
- *          样式包括：
- *          - 标签样式：灰色字体、微软雅黑
- *          - 数值样式：深色字体、Consolas 等宽字体、粗体
- *          - 分组框样式：边框、圆角、标题样式
- *          - 高亮样式：红色字体（用于异常状态）
- *          - 状态样式：蓝色正常、白色闪烁背景
- */
-void DataPanelWidget::setupStyles()
+/// @brief 初始化样式表。
+void DataPanelWidget::setup_styles()
 {
-    // 标签样式（说明文字）
-    m_labelStyle = "QLabel { color: #7f8c8d; font-size: 10pt; font-family: 'Microsoft YaHei'; }";
-    
-    // 数值样式（数据显示）
-    m_valueStyle = "QLabel { color: #2c3e50; font-size: 14pt; font-family: 'Consolas','Microsoft YaHei'; font-weight: bold; }";
-    
-    // 分组框样式
-    m_groupStyle = "QGroupBox { "
-                   "  font-family: 'Microsoft YaHei'; font-size: 10pt; font-weight: bold; "
-                   "  color: #34495e; "
-                   "  border: 2px solid #bdc3c7; border-radius: 6px; "
-                   "  margin-top: 12px; padding-top: 12px; "
+    label_style_ = "QLabel { color: #666666; font-size: 10pt; }";
+    value_style_ = "QLabel { color: #333333; font-size: 13pt; font-weight: bold; }";
+    group_style_ = "QGroupBox { "
+                   "  font-size: 10pt; font-weight: bold; "
+                   "  color: #333333; "
+                   "  border: 1px solid #cccccc; border-radius: 4px; "
+                   "  margin-top: 10px; padding-top: 10px; "
                    "} "
                    "QGroupBox::title { "
-                   "  subcontrol-origin: margin; left: 10px; padding: 0 6px; "
+                   "  subcontrol-origin: margin; left: 8px; padding: 0 4px; "
                    "}";
-    
-    // 高亮样式（异常状态）
-    m_highlightStyle = "QLabel { color: #e74c3c; font-size: 14pt; font-family: 'Consolas','Microsoft YaHei'; font-weight: bold; }";
-    
-    // 状态正常样式
-    m_stateNormalStyle = "QLabel { color: #2980b9; font-size: 14pt; font-family: 'Microsoft YaHei'; font-weight: bold; }";
-    
-    // 状态闪烁样式
-    m_stateFlashStyle = "QLabel { color: #ffffff; background-color: #2980b9; font-size: 14pt; font-family: 'Microsoft YaHei'; font-weight: bold; padding: 4px 8px; border-radius: 4px; }";
+    highlight_style_ = "QLabel { color: #d32f2f; font-size: 13pt; font-weight: bold; }";
+    state_normal_style_ = "QLabel { color: #1976d2; font-size: 13pt; font-weight: bold; }";
+    state_flash_style_ = "QLabel { color: #ffffff; background-color: #1976d2; font-size: 13pt; font-weight: bold; padding: 2px 6px; border-radius: 3px; }";
+
+    // 任务码显示样式：白底黑字，字体≥12mm（约45px）
+    display_group_style_ = "QGroupBox { "
+                           "  background-color: #ffffff; "
+                           "  border: 2px solid #333333; border-radius: 4px; "
+                           "  margin: 0px; padding: 8px; "
+                           "}";
 }
 
-void DataPanelWidget::setupUI()
+/// @brief 构建UI布局。
+void DataPanelWidget::setup_ui()
 {
-    setStyleSheet(m_groupStyle);
+    setStyleSheet(group_style_);
 
-    QVBoxLayout* mainLayout = new QVBoxLayout(this);
-    mainLayout->setContentsMargins(6, 6, 6, 6);
-    mainLayout->setSpacing(12);
+    QVBoxLayout* main_layout = new QVBoxLayout(this);
+    main_layout->setContentsMargins(4, 4, 4, 4);
+    main_layout->setSpacing(8);
 
-    m_robotGroup = new QGroupBox("机器人坐标", this);
-    QGridLayout* robotLayout = new QGridLayout(m_robotGroup);
-    robotLayout->setSpacing(8);
-    robotLayout->setVerticalSpacing(10);
+    // ---- 任务码显示（白底黑字，无标题）----
+    display_group_ = new QGroupBox(this);
+    display_group_->setStyleSheet(display_group_style_);
 
-    robotLayout->addWidget(createLabel("X 轴坐标"), 0, 0, Qt::AlignLeft);
-    m_robotX = createValueLabel("0 mm");
-    m_robotX->setStyleSheet("QLabel { color: #27ae60; font-size: 16pt; font-family: 'Consolas'; font-weight: bold; }");
-    robotLayout->addWidget(m_robotX, 0, 1, Qt::AlignRight);
+    QVBoxLayout* display_layout = new QVBoxLayout(display_group_);
+    display_layout->setContentsMargins(4, 4, 4, 4);
 
-    robotLayout->addWidget(createLabel("Y 轴坐标"), 1, 0, Qt::AlignLeft);
-    m_robotY = createValueLabel("0 mm");
-    m_robotY->setStyleSheet("QLabel { color: #27ae60; font-size: 16pt; font-family: 'Consolas'; font-weight: bold; }");
-    robotLayout->addWidget(m_robotY, 1, 1, Qt::AlignRight);
+    full_code_label_ = new QLabel(QString::fromUtf8("等待扫码..."), this);
+    full_code_label_->setStyleSheet("QLabel { color: #000000; font-size: 32pt; font-weight: bold; background-color: #ffffff; }");
+    full_code_label_->setAlignment(Qt::AlignCenter);
+    full_code_label_->setMinimumHeight(50);
+    display_layout->addWidget(full_code_label_);
 
-    robotLayout->addWidget(createLabel("朝向角度"), 2, 0, Qt::AlignLeft);
-    m_robotTheta = createValueLabel("0.0°");
-    m_robotTheta->setStyleSheet("QLabel { color: #8e44ad; font-size: 12pt; font-family: 'Consolas'; font-weight: bold; }");
-    robotLayout->addWidget(m_robotTheta, 2, 1, Qt::AlignRight);
+    main_layout->addWidget(display_group_);
 
-    mainLayout->addWidget(m_robotGroup);
+    // ---- 机器人坐标组 ----
+    robot_group_ = new QGroupBox(QString::fromUtf8("机器人坐标"), this);
+    QGridLayout* robot_layout = new QGridLayout(robot_group_);
+    robot_layout->setSpacing(6);
+    robot_layout->setContentsMargins(8, 8, 8, 8);
 
-    m_taskGroup = new QGroupBox("任务信息", this);
-    QGridLayout* taskLayout = new QGridLayout(m_taskGroup);
-    taskLayout->setSpacing(8);
-    taskLayout->setVerticalSpacing(10);
+    robot_layout->addWidget(create_label(QString::fromUtf8("X:")), 0, 0, Qt::AlignLeft);
+    robot_x_ = create_value_label("0 mm");
+    robot_x_->setStyleSheet("QLabel { color: #2e7d32; font-size: 14pt; font-weight: bold; }");
+    robot_layout->addWidget(robot_x_, 0, 1, Qt::AlignRight);
 
-    taskLayout->addWidget(createLabel("任务编码"), 0, 0, Qt::AlignLeft);
-    m_taskCode = createValueLabel("--");
-    m_taskCode->setStyleSheet("QLabel { color: #e67e22; font-size: 18pt; font-family: 'Consolas'; font-weight: bold; }");
-    taskLayout->addWidget(m_taskCode, 0, 1, Qt::AlignRight);
+    robot_layout->addWidget(create_label(QString::fromUtf8("Y:")), 0, 2, Qt::AlignLeft);
+    robot_y_ = create_value_label("0 mm");
+    robot_y_->setStyleSheet("QLabel { color: #2e7d32; font-size: 14pt; font-weight: bold; }");
+    robot_layout->addWidget(robot_y_, 0, 3, Qt::AlignRight);
 
-    taskLayout->addWidget(createLabel("当前状态"), 1, 0, Qt::AlignLeft);
-    m_taskState = createValueLabel("空闲");
-    m_taskState->setStyleSheet(m_stateNormalStyle);
-    taskLayout->addWidget(m_taskState, 1, 1, Qt::AlignRight);
+    robot_layout->addWidget(create_label(QString::fromUtf8("角度:")), 1, 0, Qt::AlignLeft);
+    robot_theta_ = create_value_label("0.0°");
+    robot_theta_->setStyleSheet("QLabel { color: #7b1fa2; font-size: 12pt; font-weight: bold; }");
+    robot_layout->addWidget(robot_theta_, 1, 1, 1, 3, Qt::AlignRight);
 
-    taskLayout->addWidget(createLabel("任务循环"), 2, 0, Qt::AlignLeft);
-    m_taskCycle = createValueLabel("0/0");
-    m_taskCycle->setStyleSheet("QLabel { color: #34495e; font-size: 11pt; font-family: 'Consolas'; font-weight: bold; }");
-    taskLayout->addWidget(m_taskCycle, 2, 1, Qt::AlignRight);
+    main_layout->addWidget(robot_group_);
 
-    taskLayout->addWidget(createLabel("物料进度"), 3, 0, Qt::AlignLeft);
-    m_taskMaterials = createValueLabel("0/0");
-    m_taskMaterials->setStyleSheet("QLabel { color: #34495e; font-size: 11pt; font-family: 'Consolas'; font-weight: bold; }");
-    taskLayout->addWidget(m_taskMaterials, 3, 1, Qt::AlignRight);
+    // ---- 任务信息组 ----
+    task_group_ = new QGroupBox(QString::fromUtf8("任务信息"), this);
+    QGridLayout* task_layout = new QGridLayout(task_group_);
+    task_layout->setSpacing(6);
+    task_layout->setContentsMargins(8, 8, 8, 8);
 
-    mainLayout->addWidget(m_taskGroup);
-    mainLayout->addStretch();
+    task_layout->addWidget(create_label(QString::fromUtf8("状态:")), 0, 0, Qt::AlignLeft);
+    task_state_ = create_value_label(QString::fromUtf8("空闲"));
+    task_state_->setStyleSheet(state_normal_style_);
+    task_layout->addWidget(task_state_, 0, 1, Qt::AlignRight);
+
+    task_layout->addWidget(create_label(QString::fromUtf8("循环:")), 1, 0, Qt::AlignLeft);
+    task_cycle_ = create_value_label("0/0");
+    task_layout->addWidget(task_cycle_, 1, 1, Qt::AlignRight);
+
+    task_layout->addWidget(create_label(QString::fromUtf8("物料:")), 2, 0, Qt::AlignLeft);
+    task_materials_ = create_value_label("0/0 | 0/0");
+    task_layout->addWidget(task_materials_, 2, 1, Qt::AlignRight);
+
+    main_layout->addWidget(task_group_);
+    main_layout->addStretch();
 }
 
-QLabel* DataPanelWidget::createLabel(const QString& text, const QString& style)
+/// @brief 创建描述标签。
+QLabel* DataPanelWidget::create_label(const QString& text, const QString& style)
 {
     QLabel* label = new QLabel(text, this);
-    label->setStyleSheet(style.isEmpty() ? m_labelStyle : style);
+    label->setStyleSheet(style.isEmpty() ? label_style_ : style);
     return label;
 }
 
-QLabel* DataPanelWidget::createValueLabel(const QString& text, const QString& color)
+/// @brief 创建数值标签。
+QLabel* DataPanelWidget::create_value_label(const QString& text, const QString& color)
 {
     QLabel* label = new QLabel(text, this);
-    QString style = m_valueStyle;
-    style.replace("#2c3e50", color);
+    QString style = value_style_;
+    style.replace("#333333", color);
     label->setStyleSheet(style);
     return label;
 }
 
-void DataPanelWidget::flashStateLabel()
+/// @brief 创建大字体标签。
+QLabel* DataPanelWidget::create_large_label(const QString& text, const QString& color)
 {
-    if (!m_taskState) return;
+    QLabel* label = new QLabel(text, this);
+    QString style = large_font_style_;
+    style.replace("#000000", color);
+    label->setStyleSheet(style);
+    label->setAlignment(Qt::AlignCenter);
+    return label;
+}
 
-    m_taskState->setStyleSheet(m_stateFlashStyle);
+/// @brief 触发状态标签闪烁。
+void DataPanelWidget::flash_state_label()
+{
+    if (!task_state_) return;
+
+    task_state_->setStyleSheet(state_flash_style_);
     QTimer::singleShot(400, this, [this]() {
-        if (m_taskState) {
-            m_taskState->setStyleSheet(m_stateNormalStyle);
+        if (task_state_) {
+            task_state_->setStyleSheet(state_normal_style_);
         }
     });
 }
 
-void DataPanelWidget::updateRobotPose(int xMm, int yMm, double thetaDeg)
+/// @brief 颜色编号到名称的映射。
+QString DataPanelWidget::color_code_to_name(int code) const
 {
-    m_robotX->setText(QString::number(xMm) + " mm");
-    m_robotY->setText(QString::number(yMm) + " mm");
-    m_robotTheta->setText(QString::number(thetaDeg, 'f', 1) + QString::fromUtf8("°"));
+    switch (code) {
+        case 1: return QString::fromUtf8("红");
+        case 2: return QString::fromUtf8("黄");
+        case 3: return QString::fromUtf8("蓝");
+        case 4: return QString::fromUtf8("绿");
+        case 5: return QString::fromUtf8("黑");
+        case 6: return QString::fromUtf8("浅蓝");
+        default: return "?";
+    }
 }
 
-void DataPanelWidget::updateTaskState(const QString& state)
+/// @brief 颜色编号到显示颜色的映射。
+QString DataPanelWidget::color_code_to_display_color(int code) const
 {
-    m_taskState->setText(state);
-    flashStateLabel();
+    switch (code) {
+        case 1: return "#ff0000";
+        case 2: return "#ffff00";
+        case 3: return "#0080ff";
+        case 4: return "#00ff00";
+        case 5: return "#ffffff";
+        case 6: return "#00ffff";
+        default: return "#888888";
+    }
 }
 
-void DataPanelWidget::updateTaskProgress(int cycle, int totalCycles, int picked, int placed, int totalMaterials)
+/// @brief 更新机器人位姿显示。
+void DataPanelWidget::update_robot_pose(int x_mm, int y_mm, double theta_deg) noexcept
 {
-    m_taskCycle->setText(QString::number(cycle) + "/" + QString::number(totalCycles));
-    m_taskMaterials->setText(QString::number(picked) + "/" + QString::number(totalMaterials) +
-                             " | " + QString::number(placed) + "/" + QString::number(totalMaterials));
+    robot_x_->setText(QString::number(x_mm) + " mm");
+    robot_y_->setText(QString::number(y_mm) + " mm");
+    robot_theta_->setText(QString::number(theta_deg, 'f', 1) + QString::fromUtf8("°"));
 }
 
-void DataPanelWidget::updateTaskCode(const QString& code)
+/// @brief 更新任务状态。
+void DataPanelWidget::update_task_state(const QString& state)
 {
-    m_taskCode->setText(code);
+    task_state_->setText(state);
+    flash_state_label();
 }
 
-void DataPanelWidget::refreshAll()
+/// @brief 更新任务进度。
+void DataPanelWidget::update_task_progress(int cycle, int total_cycles, int picked, int placed, int total_materials)
 {
-    emit dataRefreshRequested();
+    task_cycle_->setText(QString::number(cycle) + "/" + QString::number(total_cycles));
+    task_materials_->setText(QString::number(picked) + "/" + QString::number(total_materials) +
+                             " | " + QString::number(placed) + "/" + QString::number(total_materials));
+}
+
+/// @brief 更新任务编码（显示在任务码区域）。
+void DataPanelWidget::update_task_code(const QString& code)
+{
+    full_code_label_->setText(code);
+}
+
+/// @brief 设置完整任务码显示。
+void DataPanelWidget::set_full_task_code(const QString& full_code,
+                                          const QVector<int>& batch1_colors,
+                                          const QVector<int>& batch1_positions,
+                                          const QVector<int>& batch2_colors,
+                                          const QVector<int>& batch2_positions)
+{
+    // 只显示完整任务码，扫码后一直显示
+    full_code_label_->setText(full_code);
+
+    // 重置状态
+    batch1_completed_ = {false, false, false};
+    batch2_completed_ = {false, false, false};
+}
+
+/// @brief 更新批次完成状态。
+void DataPanelWidget::update_batch_status(int batch, int step, bool completed)
+{
+    QVector<bool>* status = (batch == 1) ? &batch1_completed_ : &batch2_completed_;
+
+    if (step >= 1 && step <= 3) {
+        status->replace(step - 1, completed);
+    }
 }

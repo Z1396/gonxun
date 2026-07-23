@@ -10,8 +10,6 @@ CompileFlags:
     - "-Wreorder"
 
 Diagnostics:
-  UnusedIncludes: None
-  MissingIncludes: None
   Suppress:
     - pp_file_not_found
     - pp_through_undef
@@ -19,6 +17,25 @@ Diagnostics:
     - reorder
     - unused-parameter
     - c++2b-extensions
-
-# 使用 compile_commands.json（由 CMake 生成）
-# clangd 会从编译数据库读取正确的编译选项
+    - readability-identifier-naming
+    - readability-braces-around-statements
+    - readability-implicit-bool-conversion
+    - readability-redundant-access-specifiers
+    - readability-make-member-function-const
+    - modernize-use-auto
+    - modernize-use-transparent-functors
+    - cppcoreguidelines-owning-memory
+    - cppcoreguidelines-special-member-functions
+    - cppcoreguidelines-pro-bounds-constant-array-index
+    - cppcoreguidelines-pro-bounds-array-to-pointer-decay
+    - cppcoreguidelines-non-private-member-variables-in-classes
+    - hicpp-special-member-functions
+    - hicpp-no-array-decay
+    - cert-err58-cpp
+    - misc-non-private-member-variables-in-classes
+    - bugprone-easily-swappable-parameters
+    - bugprone-narrowing-conversions
+    - bugprone-exception-escape
+    - clang-analyzer-core.uninitialized.Assign
+    - clang-analyzer-cplusplus.NewDeleteLeaks
+    - clang-analyzer-cplusplus.NewDelete

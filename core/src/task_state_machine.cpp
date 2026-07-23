@@ -1,398 +1,319 @@
 /**
  * @file task_state_machine.cpp
- * @brief 任务状态机实现文件
- * 
- * @details 本文件实现了基于有限状态机（FSM）的任务管理功能。
- *          核心特性：
- *          - 状态定义：18个状态覆盖整个任务生命周期
- *          - 事件驱动：通过事件触发状态转换
- *          - 状态转换表：明确定义每个状态的事件响应
- *          - 进度跟踪：实时更新任务进度信息
- *          - 回调机制：支持状态变化和进度通知
- * 
- * @author 智能物流搬运系统开发团队
- * @version 1.0
- * @date 2025-01-01
- * 
- * @note 修改历史：
- *       - 2025-01-01: 初始版本，实现基础状态机
- *       - 2025-02-15: 增加循环和进度跟踪
- *       
- * @note 状态机模式：
- *       - 状态：系统在某一时刻的状况
- *       - 事件：触发状态转换的外部输入
- *       - 转换：从当前状态到新状态的变化
- *       - 动作：状态转换时执行的操作
- *       
- * @note 状态流程：
- *       IDLE → MARKING → READY → MOVING_TO_QR → SCANNING_QR → QR_DONE
- *       → MOVING_TO_MATERIAL → PICKING_MATERIAL → MATERIAL_DONE
- *       → MOVING_TO_PROCESS → PLACING_MATERIAL → PROCESS_DONE
- *       → MOVING_TO_BUFFER → BUFFER_DONE → [CYCLE_REPEAT or RETURNING]
- *       → COMPLETED
- *       
- * @note 循环机制：
- *       - 默认循环 2 次
- *       - 每次循环重置物料计数
- *       - 达到循环次数后返回启停区
- *       
- * @note 异常处理：
- *       - ERROR 状态：可从任意状态进入
- *       - 恢复机制：通过 RESET 事件重置，或 START_MISSION 事件重启
- *       
- * @see task_state_machine.hpp
+ * @brief 任务状态机实现。
+ *
+ * 实现 16 种状态的事件分发与转移逻辑，每状态对应一个 handle_xxx_event
+ * 方法，通过 switch-case 映射事件到目标状态。转移时触发回调通知。
  */
+
 #include "task_state_machine.hpp"
+
 #include <iostream>
 
 namespace gonxun {
 
-/**
- * @brief 构造函数，初始化状态机
- * 
- * @details 设置初始状态为 IDLE，并初始化进度信息。
- */
-TaskStateMachine::TaskStateMachine()
-{
-    m_currentState = TaskState::IDLE;  // 初始状态：空闲
-    m_progress = {};
-    m_progress.currentState = m_currentState;
-    m_progress.currentCycle = 0;       // 当前循环次数
-    m_progress.totalCycles = 2;        // 默认2轮循环
-    m_progress.materialsPicked = 0;    // 已取物料数
-    m_progress.materialsPlaced = 0;    // 已放物料数
-    m_progress.totalMaterials = 3;     // 默认3个物料
-    m_progress.stateDescription = stateToString(m_currentState);
+TaskStateMachine::TaskStateMachine() {
+    current_state_ = TaskState::IDLE;
+    progress_ = {};
+    progress_.current_state = current_state_;
+    progress_.current_cycle = 0;
+    progress_.total_cycles = 2;        // 默认 2 轮循环
+    progress_.materials_picked = 0;
+    progress_.materials_placed = 0;
+    progress_.total_materials = 3;     // 默认每轮 3 个物料
+    progress_.state_description = state_to_string(current_state_);
 }
 
 /**
- * @brief 处理事件并执行状态转换
- * 
- * @details 根据当前状态和事件，执行相应的状态转换。
- *          使用状态转换表（switch-case嵌套）实现FSM逻辑。
- *          
- * @param event 触发事件
- *        - START_MARKING: 开始标记（启动任务）
- *        - MARKING_DONE: 标记完成
- *        - START_MISSION: 开始任务
- *        - REACHED_QR: 到达扫码区
- *        - QR_SCANNED: 扫码完成
- *        - REACHED_MATERIAL: 到达物料区
- *        - MATERIAL_PICKED: 取料完成
- *        - REACHED_PROCESS: 到达粗加工区
- *        - MATERIAL_PLACED: 放料完成
- *        - REACHED_BUFFER: 到达暂存区
- *        - REACHED_START: 返回启停区
- *        - CYCLE_START: 开始新循环
- *        - ALL_DONE: 任务完成
- *        - ERROR_OCCURRED: 异常发生
- *        - EMERGENCY_STOP: 紧急停止
- *        - RESET: 重置状态机
- *        
- * @return TaskState 转换后的新状态
- *         
- * @note 状态转换表（部分）：
- *       | 当前状态           | 事件              | 新状态               |
- *       |--------------------|-------------------|----------------------|
- *       | IDLE               | START_MARKING     | MARKING              |
- *       | MARKING            | MARKING_DONE      | READY                |
- *       | READY              | START_MISSION     | MOVING_TO_QR         |
- *       | MOVING_TO_QR       | REACHED_QR        | SCANNING_QR          |
- *       | SCANNING_QR        | QR_SCANNED        | QR_DONE              |
- *       | QR_DONE            | -                 | MOVING_TO_MATERIAL   |
- *       | MOVING_TO_MATERIAL | REACHED_MATERIAL  | PICKING_MATERIAL     |
- *       | PICKING_MATERIAL   | MATERIAL_PICKED   | MATERIAL_DONE        |
- *       | MATERIAL_DONE      | -                 | MOVING_TO_PROCESS    |
- *       | MOVING_TO_PROCESS  | REACHED_PROCESS   | PLACING_MATERIAL     |
- *       | PLACING_MATERIAL   | MATERIAL_PLACED   | PROCESS_DONE         |
- *       | PROCESS_DONE       | -                 | MOVING_TO_BUFFER     |
- *       | MOVING_TO_BUFFER   | REACHED_BUFFER    | BUFFER_DONE          |
- *       | BUFFER_DONE        | -                 | CYCLE_REPEAT/RETURNING|
- *       | CYCLE_REPEAT       | CYCLE_START       | MOVING_TO_QR         |
- *       | RETURNING          | REACHED_START     | COMPLETED            |
- *       | 任意状态           | ERROR_OCCURRED    | ERROR                |
- *       | 任意状态           | RESET             | IDLE                 |
- *       
- * @see transitionTo()
+ * @brief 事件分发入口，根据当前状态调用对应的 handler。
+ * @param event 输入事件
+ * @return 处理后的当前状态
  */
-TaskState TaskStateMachine::handleEvent(TaskEvent event)
-{
-    // 状态转换表：根据当前状态和事件执行转换
-    switch (m_currentState) {
-    // ===== 空闲状态 =====
+TaskState TaskStateMachine::handle_event(TaskEvent event) {
+    switch (current_state_) {
     case TaskState::IDLE:
-        switch (event) {
-        case TaskEvent::START_MARKING:
-            transitionTo(TaskState::MARKING);
-            break;
-        case TaskEvent::RESET:
-            reset();
-            break;
-        default: break;
-        }
+        handle_idle_event(event);
         break;
-
-    // ===== 标记阶段 =====
     case TaskState::MARKING:
-        switch (event) {
-        case TaskEvent::MARKING_DONE:
-            transitionTo(TaskState::READY);
-            break;
-        case TaskEvent::RESET:
-            reset();
-            break;
-        default: break;
-        }
+        handle_marking_event(event);
         break;
-
-    // ===== 准备出发 =====
     case TaskState::READY:
-        switch (event) {
-        case TaskEvent::START_MISSION:
-            m_progress.currentCycle = 1;
-            transitionTo(TaskState::MOVING_TO_QR);
-            break;
-        case TaskEvent::RESET:
-            reset();
-            break;
-        default: break;
-        }
+        handle_ready_event(event);
         break;
-
-    // ===== 前往扫码区 =====
     case TaskState::MOVING_TO_QR:
-        switch (event) {
-        case TaskEvent::REACHED_QR:
-            transitionTo(TaskState::SCANNING_QR);
-            break;
-        case TaskEvent::ERROR_OCCURRED:
-            transitionTo(TaskState::ERROR);
-            break;
-        case TaskEvent::EMERGENCY_STOP:
-            transitionTo(TaskState::ERROR);
-            break;
-        default: break;
-        }
+        handle_moving_to_qr_event(event);
         break;
-
-    // ===== 扫码中 =====
     case TaskState::SCANNING_QR:
-        switch (event) {
-        case TaskEvent::QR_SCANNED:
-            transitionTo(TaskState::QR_DONE);
-            break;
-        case TaskEvent::ERROR_OCCURRED:
-            transitionTo(TaskState::ERROR);
-            break;
-        default: break;
-        }
+        handle_scanning_qr_event(event);
         break;
-
-    // ===== 扫码完成，前往物料区 =====
     case TaskState::QR_DONE:
-        switch (event) {
-        case TaskEvent::REACHED_MATERIAL:
-            // QR_DONE 直接到物料区（实际可能省略中间移动状态）
-            transitionTo(TaskState::MOVING_TO_MATERIAL);
-            break;
-        default:
-            // 自动转换到移动状态
-            transitionTo(TaskState::MOVING_TO_MATERIAL);
-            break;
-        }
+        // QR 扫码完成后自动转入前往物料区
+        transition_to(TaskState::MOVING_TO_MATERIAL);
         break;
-
-    // ===== 前往物料区 =====
     case TaskState::MOVING_TO_MATERIAL:
-        switch (event) {
-        case TaskEvent::REACHED_MATERIAL:
-            transitionTo(TaskState::PICKING_MATERIAL);
-            break;
-        case TaskEvent::ERROR_OCCURRED:
-            transitionTo(TaskState::ERROR);
-            break;
-        default: break;
-        }
+        handle_moving_to_material_event(event);
         break;
-
-    // ===== 取料中 =====
     case TaskState::PICKING_MATERIAL:
-        switch (event) {
-        case TaskEvent::MATERIAL_PICKED:
-            m_progress.materialsPicked++;
-            if (m_progress.materialsPicked >= m_progress.totalMaterials) {
-                transitionTo(TaskState::MATERIAL_DONE);
-            }
-            break;
-        case TaskEvent::ERROR_OCCURRED:
-            transitionTo(TaskState::ERROR);
-            break;
-        default: break;
-        }
+        handle_picking_material_event(event);
         break;
-
-    // ===== 取料完成，前往粗加工区 =====
     case TaskState::MATERIAL_DONE:
-        transitionTo(TaskState::MOVING_TO_PROCESS);
+        // 取料完成后自动转入前往粗加工区
+        transition_to(TaskState::MOVING_TO_PROCESS);
         break;
-
-    // ===== 前往粗加工区 =====
     case TaskState::MOVING_TO_PROCESS:
-        switch (event) {
-        case TaskEvent::REACHED_PROCESS:
-            transitionTo(TaskState::PLACING_MATERIAL);
-            break;
-        case TaskEvent::ERROR_OCCURRED:
-            transitionTo(TaskState::ERROR);
-            break;
-        default: break;
-        }
+        handle_moving_to_process_event(event);
         break;
-
-    // ===== 放料中 =====
     case TaskState::PLACING_MATERIAL:
-        switch (event) {
-        case TaskEvent::MATERIAL_PLACED:
-            m_progress.materialsPlaced++;
-            if (m_progress.materialsPlaced >= m_progress.totalMaterials) {
-                transitionTo(TaskState::PROCESS_DONE);
-            }
-            break;
-        case TaskEvent::ERROR_OCCURRED:
-            transitionTo(TaskState::ERROR);
-            break;
-        default: break;
-        }
+        handle_placing_material_event(event);
         break;
-
-    // ===== 放料完成，前往暂存区 =====
     case TaskState::PROCESS_DONE:
-        transitionTo(TaskState::MOVING_TO_BUFFER);
+        // 放料完成后自动转入前往暂存区
+        transition_to(TaskState::MOVING_TO_BUFFER);
         break;
-
-    // ===== 前往暂存区 =====
     case TaskState::MOVING_TO_BUFFER:
-        switch (event) {
-        case TaskEvent::REACHED_BUFFER:
-            transitionTo(TaskState::BUFFER_DONE);
-            break;
-        case TaskEvent::ERROR_OCCURRED:
-            transitionTo(TaskState::ERROR);
-            break;
-        default: break;
-        }
+        handle_moving_to_buffer_event(event);
         break;
-
-    // ===== 暂存完成 =====
     case TaskState::BUFFER_DONE:
-        // 检查是否需要循环
-        if (m_progress.currentCycle < m_progress.totalCycles) {
-            transitionTo(TaskState::CYCLE_REPEAT);
-        } else {
-            transitionTo(TaskState::RETURNING);
-        }
+        handle_buffer_done_event(event);
         break;
-
-    // ===== 循环重复 =====
     case TaskState::CYCLE_REPEAT:
-        switch (event) {
-        case TaskEvent::CYCLE_START:
-            m_progress.currentCycle++;
-            m_progress.materialsPicked = 0;
-            m_progress.materialsPlaced = 0;
-            transitionTo(TaskState::MOVING_TO_QR);
-            break;
-        default: break;
-        }
+        handle_cycle_repeat_event(event);
         break;
-
-    // ===== 返回启停区 =====
     case TaskState::RETURNING:
-        switch (event) {
-        case TaskEvent::REACHED_START:
-            transitionTo(TaskState::COMPLETED);
-            break;
-        case TaskEvent::ERROR_OCCURRED:
-            transitionTo(TaskState::ERROR);
-            break;
-        default: break;
-        }
+        handle_returning_event(event);
         break;
-
-    // ===== 任务完成 =====
     case TaskState::COMPLETED:
-        switch (event) {
-        case TaskEvent::RESET:
-            reset();
-            break;
-        default: break;
-        }
+        if (event == TaskEvent::RESET) reset();
         break;
-
-    // ===== 异常状态 =====
     case TaskState::ERROR:
-        switch (event) {
-        case TaskEvent::RESET:
-            reset();
-            break;
-        case TaskEvent::START_MISSION:
-            // 从异常恢复，重新开始
-            transitionTo(TaskState::READY);
-            break;
-        default: break;
-        }
+        handle_error_event(event);
         break;
     }
-
-    return m_currentState;
+    return current_state_;
 }
 
-void TaskStateMachine::transitionTo(TaskState newState)
-{
-    if (newState == m_currentState) return;
-
-    TaskState oldState = m_currentState;
-    m_currentState = newState;
-    m_progress.currentState = newState;
-    m_progress.stateDescription = stateToString(newState);
-
-    std::cout << "[StateMachine] " << stateToString(oldState)
-              << " -> " << stateToString(newState) << std::endl;
-
-    if (m_stateChangeCb) {
-        m_stateChangeCb(oldState, newState);
-    }
-    notifyProgress();
-}
-
-void TaskStateMachine::notifyProgress()
-{
-    if (m_progressCb) {
-        m_progressCb(m_progress);
+void TaskStateMachine::handle_idle_event(TaskEvent event) {
+    switch (event) {
+    case TaskEvent::START_MARKING:
+        transition_to(TaskState::MARKING);
+        break;
+    case TaskEvent::RESET:
+        reset();
+        break;
+    default: break;
     }
 }
 
-bool TaskStateMachine::isActive() const
-{
-    return m_currentState != TaskState::IDLE &&
-           m_currentState != TaskState::COMPLETED &&
-           m_currentState != TaskState::ERROR;
+void TaskStateMachine::handle_marking_event(TaskEvent event) {
+    switch (event) {
+    case TaskEvent::MARKING_DONE:
+        transition_to(TaskState::READY);
+        break;
+    case TaskEvent::RESET:
+        reset();
+        break;
+    default: break;
+    }
 }
 
-void TaskStateMachine::reset()
-{
-    m_currentState = TaskState::IDLE;
-    m_progress = {};
-    m_progress.currentState = TaskState::IDLE;
-    m_progress.totalCycles = 2;
-    m_progress.totalMaterials = 3;
-    m_progress.stateDescription = stateToString(TaskState::IDLE);
+void TaskStateMachine::handle_ready_event(TaskEvent event) {
+    switch (event) {
+    case TaskEvent::START_MISSION:
+        progress_.current_cycle = 1;  // 首轮循环
+        transition_to(TaskState::MOVING_TO_QR);
+        break;
+    case TaskEvent::RESET:
+        reset();
+        break;
+    default: break;
+    }
+}
+
+void TaskStateMachine::handle_moving_to_qr_event(TaskEvent event) {
+    switch (event) {
+    case TaskEvent::REACHED_QR:
+        transition_to(TaskState::SCANNING_QR);
+        break;
+    case TaskEvent::ERROR_OCCURRED:
+    case TaskEvent::EMERGENCY_STOP:
+        transition_to(TaskState::ERROR);
+        break;
+    default: break;
+    }
+}
+
+void TaskStateMachine::handle_scanning_qr_event(TaskEvent event) {
+    switch (event) {
+    case TaskEvent::QR_SCANNED:
+        transition_to(TaskState::QR_DONE);
+        break;
+    case TaskEvent::ERROR_OCCURRED:
+        transition_to(TaskState::ERROR);
+        break;
+    default: break;
+    }
+}
+
+void TaskStateMachine::handle_moving_to_material_event(TaskEvent event) {
+    switch (event) {
+    case TaskEvent::REACHED_MATERIAL:
+        transition_to(TaskState::PICKING_MATERIAL);
+        break;
+    case TaskEvent::ERROR_OCCURRED:
+        transition_to(TaskState::ERROR);
+        break;
+    default: break;
+    }
+}
+
+void TaskStateMachine::handle_picking_material_event(TaskEvent event) {
+    switch (event) {
+    case TaskEvent::MATERIAL_PICKED:
+        progress_.materials_picked++;
+        // 单轮物料全部取完才转入 MATERIAL_DONE
+        if (progress_.materials_picked >= progress_.total_materials) {
+            transition_to(TaskState::MATERIAL_DONE);
+        }
+        break;
+    case TaskEvent::ERROR_OCCURRED:
+        transition_to(TaskState::ERROR);
+        break;
+    default: break;
+    }
+}
+
+void TaskStateMachine::handle_moving_to_process_event(TaskEvent event) {
+    switch (event) {
+    case TaskEvent::REACHED_PROCESS:
+        transition_to(TaskState::PLACING_MATERIAL);
+        break;
+    case TaskEvent::ERROR_OCCURRED:
+        transition_to(TaskState::ERROR);
+        break;
+    default: break;
+    }
+}
+
+void TaskStateMachine::handle_placing_material_event(TaskEvent event) {
+    switch (event) {
+    case TaskEvent::MATERIAL_PLACED:
+        progress_.materials_placed++;
+        // 单轮物料全部放完才转入 PROCESS_DONE
+        if (progress_.materials_placed >= progress_.total_materials) {
+            transition_to(TaskState::PROCESS_DONE);
+        }
+        break;
+    case TaskEvent::ERROR_OCCURRED:
+        transition_to(TaskState::ERROR);
+        break;
+    default: break;
+    }
+}
+
+void TaskStateMachine::handle_moving_to_buffer_event(TaskEvent event) {
+    switch (event) {
+    case TaskEvent::REACHED_BUFFER:
+        transition_to(TaskState::BUFFER_DONE);
+        break;
+    case TaskEvent::ERROR_OCCURRED:
+        transition_to(TaskState::ERROR);
+        break;
+    default: break;
+    }
+}
+
+void TaskStateMachine::handle_buffer_done_event(TaskEvent event) {
+    // 暂存完成后判断是否需要下一轮循环
+    if (progress_.current_cycle < progress_.total_cycles) {
+        transition_to(TaskState::CYCLE_REPEAT);
+    } else {
+        transition_to(TaskState::RETURNING);
+    }
+}
+
+void TaskStateMachine::handle_cycle_repeat_event(TaskEvent event) {
+    if (event == TaskEvent::CYCLE_START) {
+        progress_.current_cycle++;
+        progress_.materials_picked = 0;    // 重置本轮计数
+        progress_.materials_placed = 0;
+        transition_to(TaskState::MOVING_TO_QR);
+    }
+}
+
+void TaskStateMachine::handle_returning_event(TaskEvent event) {
+    switch (event) {
+    case TaskEvent::REACHED_START:
+        transition_to(TaskState::COMPLETED);
+        break;
+    case TaskEvent::ERROR_OCCURRED:
+        transition_to(TaskState::ERROR);
+        break;
+    default: break;
+    }
+}
+
+void TaskStateMachine::handle_error_event(TaskEvent event) {
+    switch (event) {
+    case TaskEvent::RESET:
+        reset();
+        break;
+    case TaskEvent::START_MISSION:
+        // 从异常恢复到就绪状态
+        transition_to(TaskState::READY);
+        break;
+    default: break;
+    }
+}
+
+/**
+ * @brief 转移到新状态，更新进度并触发回调。
+ * @param new_state 目标状态
+ * @note 若 new_state 与当前状态相同则跳过
+ */
+void TaskStateMachine::transition_to(TaskState new_state) {
+    if (new_state == current_state_) return;
+
+    TaskState old_state = current_state_;
+    current_state_ = new_state;
+    progress_.current_state = new_state;
+    progress_.state_description = state_to_string(new_state);
+
+    std::cout << "[StateMachine] " << state_to_string(old_state)
+              << " -> " << state_to_string(new_state) << std::endl;
+
+    if (state_change_cb_) {
+        state_change_cb_(old_state, new_state);
+    }
+    notify_progress();
+}
+
+void TaskStateMachine::notify_progress() {
+    if (progress_cb_) {
+        progress_cb_(progress_);
+    }
+}
+
+bool TaskStateMachine::is_active() const {
+    return current_state_ != TaskState::IDLE &&
+           current_state_ != TaskState::COMPLETED &&
+           current_state_ != TaskState::ERROR;
+}
+
+/**
+ * @brief 重置状态机到 IDLE，恢复默认进度值。
+ */
+void TaskStateMachine::reset() {
+    current_state_ = TaskState::IDLE;
+    progress_ = {};
+    progress_.current_state = TaskState::IDLE;
+    progress_.total_cycles = 2;
+    progress_.total_materials = 3;
+    progress_.state_description = state_to_string(TaskState::IDLE);
     std::cout << "[StateMachine] 已重置" << std::endl;
-    notifyProgress();
+    notify_progress();
 }
 
-std::string TaskStateMachine::stateToString(TaskState state)
-{
+std::string TaskStateMachine::state_to_string(TaskState state) {
     switch (state) {
     case TaskState::IDLE:               return "空闲";
     case TaskState::MARKING:            return "标记中";
@@ -412,8 +333,13 @@ std::string TaskStateMachine::stateToString(TaskState state)
     case TaskState::RETURNING:          return "返回启停区";
     case TaskState::COMPLETED:          return "任务完成";
     case TaskState::ERROR:              return "异常";
-    default: return "未知";
     }
+    return "未知";
+}
+
+Point TaskStateMachine::get_current_target() const {
+    // 占位实现，返回原点
+    return {0, 0};
 }
 
 } // namespace gonxun

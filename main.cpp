@@ -1,185 +1,129 @@
+/// @file main.cpp
+/// @brief Gonxun 智能物流搬运系统主入口（GUI模式）
+///
+/// 【系统完整启动流水线（固定顺序）】
+///  1. 注册全局信号钩子：支持终端 Ctrl+C、系统 kill 优雅退出
+///  2. 加载 YAML 全局系统配置（参数统一中心化管理）
+///  3. 初始化 Qt 应用核心实例
+///  4. 解析命令行参数，支持覆盖配置文件、模拟串口、自定义设备
+///  5. 实例化顶层视觉业务系统（相机、YOLO、卡尔曼、串口、二维码、圆环检测）
+///  6. 创建UI主窗口、视觉线程控制器
+///  7. 绑定UI按钮信号 ↔ 视觉线程启停槽函数
+///  8. 启动Qt事件循环，常驻运行
+///  9. 程序退出时自动停止线程、释放资源、安全收尾
+///
+/// 【模块依赖关系】
+///  MainWindow(UI) --控制--> VisionController(线程管理器)
+///  VisionController --调度--> VisionSystem(视觉算法业务)
+///  VisionSystem --依赖--> ConfigLoader(全局配置)
+
+#include "mainwindow.hpp"        // UI主窗口
+#include "vision_system.hpp"     // 视觉算法总系统
+#include "config_loader.hpp"     // YAML配置加载器
+#include "app_signals.hpp"       // 系统信号优雅退出
+#include "cli_parser.hpp"        // 命令行参数解析
+#include "vision_controller.hpp" // 视觉线程控制器
+
+#include <QApplication>
+#include <iostream>
+
 /**
- * Gonxun 系统主入口【新版工程化版本】
- * 系统定位：智能物流视觉搬运系统，整合视觉算法、串口通信、GUI可视化界面
- * 核心特性：模块化封装、低耦合、多启动模式、优雅启停
- *
- * 完整启动用法:
- *   ./CourtMapViewer                        # 正常GUI启动，界面手动控制视觉系统启停
- *   ./CourtMapViewer --mock-serial          # 调试模式：模拟串口，无需真实硬件
- *   ./CourtMapViewer --headless             # 服务器部署：无头后台运行，无GUI界面
- *   ./CourtMapViewer --config path.yaml     # 自定义加载指定配置文件
- *   ./CourtMapViewer --simulate             # 仿真模式：不连接硬件，模拟完整任务流程
- *   ./CourtMapViewer --simulate --task-code 312  # 仿真模式 + 指定任务码
+ * @brief 程序唯一入口函数
+ * @param argc 参数个数
+ * @param argv 参数数组
+ * @return int 程序退出码
+ * @note 所有模块生命周期全部由 main 统一管理
  */
-
-// Qt基础核心依赖
-#include <QApplication>     // Qt应用核心类，管理事件循环、窗口生命周期、程序全局资源
-#include <QThread>          // Qt线程工具类，提供线程休眠等静态方法
-#include <iostream>         // 标准控制台日志输出
-
-// 项目自定义模块化头文件（全部抽离封装，解耦核心逻辑）
-#include "mainwindow.h"     // 主窗口UI类：界面展示、用户操作、启停信号发射
-#include "vision_system.hpp"// 视觉系统核心类：摄像头采集、图像预处理、算法识别、串口数据交互
-#include "config_loader.hpp"// 配置文件单例加载器：解析YAML配置、全局参数统一管理
-#include "app_signals.hpp"  // 应用全局信号管理：进程信号捕获、全局运行状态管控、优雅退出
-#include "cli_parser.hpp"   // 命令行参数解析器：独立封装启动参数解析逻辑
-#include "vision_controller.hpp" // 视觉线程控制器：统一管理视觉子线程启停、资源回收
-#include "task_simulator.hpp"    // 任务仿真系统：任务码→程序生成→模拟执行→报告
-
-// 程序唯一入口函数
-int main(int argc, char *argv[])
+int main(int argc, char* argv[])
 {
-    // ========== 1. 初始化全局信号处理（系统优雅退出） ==========
-    // 封装底层信号注册逻辑：捕获Ctrl+C、系统终止信号
-    // 作用：程序异常/手动终止时，安全释放摄像头、串口、线程资源，避免硬件卡死、内存泄漏
-    gonxun::setupSignalHandlers();
+    // ===================== 1. 注册全局系统信号处理器 =====================
+    // 作用：捕获 SIGINT(Ctrl+C) / SIGTERM(程序终止)
+    // 实现后台线程、串口、资源优雅释放，杜绝僵尸进程、串口卡死
+    gonxun::setup_signal_handlers();
 
-    // ========== 2. 初始化并加载系统配置文件 ==========
-    // 获取全局唯一的配置加载器实例（单例模式，全局共享一份配置）
-    auto& configLoader = gonxun::ConfigLoader::instance();
-    // 默认加载项目核心配置文件
-    configLoader.load("config/config.yaml");
-    // 获取配置只读引用，后续所有硬件参数、系统参数均从此读取
-    const auto& cfg = configLoader.config();
-
-    // ========== 3. 初始化Qt应用实例 ==========
-    // 仿真模式无显示器时使用 offscreen 平台
-    bool wantSimulate = false;
-    for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--simulate") {
-            wantSimulate = true;
-            break;
-        }
+    // ===================== 2. 加载全局YAML配置 =====================
+    // 单例配置加载器，全局唯一
+    auto& config_loader = gonxun::ConfigLoader::instance();
+    // 加载默认配置文件 config/config.yaml
+    if (!config_loader.load("config/config.yaml")) {
+        std::cerr << "[Main] 警告: 加载默认配置文件失败，使用内置默认值" << std::endl;
     }
-    if (wantSimulate) {
-        qputenv("QT_QPA_PLATFORM", "offscreen");
-    }
+    // 获取全局配置引用（所有模块参数来源）
+    const auto& cfg = config_loader.config();
 
-    // 创建Qt应用核心对象，接管程序事件循环
+    // ===================== 3. 初始化Qt应用实例 =====================
+    // Qt程序必须最先初始化QApplication
     QApplication app(argc, argv);
-    // 从配置文件读取并设置程序名称
+    // 设置应用名称、版本（用于窗口信息、日志、打包信息）
     app.setApplicationName(QString::fromStdString(cfg.system.name));
-    // 从配置文件读取并设置程序版本号
     app.setApplicationVersion(QString::fromStdString(cfg.system.version));
 
-    // ========== 4. 解析命令行启动参数（核心解耦优化点） ==========
-    // 实例化独立命令行解析器，传入：Qt应用、默认配置路径、默认串口端口
-    gonxun::CliParser cliParser(app, "config/config.yaml", cfg.serial.port);
-    // 执行参数解析，返回结构化的启动参数配置
-    auto options = cliParser.parse();
+    // ===================== 4. 解析命令行启动参数 =====================
+    // 支持启动时自定义：配置文件路径、串口设备、模拟模式
+    gonxun::CliParser cli_parser(app, "config/config.yaml", cfg.serial.port);
+    auto options = cli_parser.parse();
 
-    // 优先级覆盖：如果命令行指定了自定义配置文件路径，重新加载配置
-    // 命令行参数优先级 > 默认配置文件，适配多环境部署需求
-    if (options.configPath != "config/config.yaml") {
-        configLoader.load(options.configPath);
+    // 如果命令行指定了自定义配置文件，则重新加载覆盖默认配置
+    if (options.config_path != "config/config.yaml") {
+        if (!config_loader.load(options.config_path)) {
+            std::cerr << "[Main] 警告: 加载配置文件失败: " << options.config_path << std::endl;
+        }
     }
 
-    // 合并参数逻辑：命令行参数 或 配置文件开启模拟串口，均启用调试模式
-    bool mockSerial = options.mockSerial || cfg.serial.mock;
-    // 最终生效的串口端口（优先使用命令行指定端口）
-    std::string serialPort = options.serialPort;
+    // 串口模拟模式优先级：命令行参数 > 配置文件
+    bool mock_serial = options.mock_serial || cfg.serial.mock;
+    // 串口设备名优先使用命令行传入
+    std::string serial_port = options.serial_port;
 
-    // ========== 5. 初始化视觉系统核心实例 ==========
+    // ===================== 5. 初始化【视觉总系统】 =====================
+    // 包含：双相机、YOLO检测、卡尔曼滤波、圆环检测、二维码检测、串口通信
+    // 所有底层硬件+算法模块在此统一构造
     std::cout << "[Main] 初始化视觉系统..." << std::endl;
-    std::cout << "[Main] 配置文件路径: " << options.configPath << std::endl;
-    std::cout << "[Main] 串口设备: " << serialPort
-              << " (模拟串口模式=" << (mockSerial ? "开启" : "关闭") << ")" << std::endl;
+    std::cout << "[Main] 配置文件路径: " << options.config_path << std::endl;
+    std::cout << "[Main] 串口设备: " << serial_port
+              << " (模拟串口=" << (mock_serial ? "开启" : "关闭") << ")" << std::endl;
 
-    // 构造视觉系统对象，注入所有硬件配置参数
-    // 参数：模拟串口开关、串口端口、波特率、主摄像头索引、QR摄像头索引
-    VisionSystem visionSystem(
-        mockSerial,
-        serialPort,
-        cfg.serial.baudrate,
-        cfg.camera.main.index,
-        cfg.camera.qr.index
+    VisionSystem vision_system(
+        mock_serial,                     // 是否模拟串口
+        serial_port,                     // 串口设备名
+        cfg.serial.baudrate,             // 波特率
+        cfg.camera.main.index,           // 主相机ID
+        cfg.camera.qr.index              // 扫码相机ID
     );
 
-    // ========== 6. 仿真模式（不连接硬件，模拟完整任务流程） ==========
-    if (options.simulate) {
-        std::cout << "[Main] 系统运行【仿真模式】" << std::endl;
+    // ===================== 6. 启动GUI主窗口 =====================
+    std::cout << "[Main] 启动 GUI 界面..." << std::endl;
 
-        gonxun::TaskSimulator simulator;
-
-        // 设置任务码
-        if (!simulator.setTaskCode(options.taskCode)) {
-            std::cerr << "[Main] 任务码非法: " << options.taskCode << std::endl;
-            return 1;
-        }
-
-        // 设置循环次数和速度
-        simulator.setTotalCycles(2);
-        simulator.setSpeedMultiplier(10.0);  // 10倍速仿真
-
-        // 注册回调：实时打印步骤执行情况
-        simulator.onStep([](const gonxun::StepRecord& r) {
-            std::cout << "  [步骤 " << r.stepIndex << "] "
-                      << r.timestamp << " | "
-                      << (r.success ? "OK" : "ERR") << " | "
-                      << r.result
-                      << " (" << r.duration << "s)" << std::endl;
-        });
-
-        // 注册回调：状态变更通知
-        simulator.onStateChange([](gonxun::TaskState oldState, gonxun::TaskState newState) {
-            std::cout << "  [状态] " << gonxun::TaskStateMachine::stateToString(oldState)
-                      << " -> " << gonxun::TaskStateMachine::stateToString(newState) << std::endl;
-        });
-
-        // 运行仿真
-        bool success = simulator.run();
-
-        // 输出结果
-        std::cout << "\n[Main] 仿真" << (success ? "成功" : "失败") << std::endl;
-        return success ? 0 : 1;
-    }
-
-    // ========== 7. 无头模式逻辑（后台部署模式） ==========
-    // 适用于：无显示器服务器、后台常驻运行、纯算法调试场景
-    if (options.headless) {
-        std::cout << "[Main] 系统运行【无头后台模式】" << std::endl;
-        // 全局运行状态循环，由app_signals统一管控启停
-        while (gonxun::isRunning()) {
-            // 读取主摄像头图像帧
-            auto [success, frame] = visionSystem.camera.readMain();
-            // 读取成功则执行全套视觉算法处理
-            if (success) {
-                visionSystem.processFrame(frame);
-            }
-            // 休眠1ms，释放CPU资源，避免空转满载
-            QThread::msleep(1);
-        }
-        // 循环退出，程序结束
-        return 0;
-    }
-
-    // ========== 8. 标准GUI可视化模式（人机交互模式） ==========
-    std::cout << "[Main] 系统运行【GUI可视化模式】，启动界面中..." << std::endl;
-
-    // 创建主窗口UI实例
+    // 创建主窗口（UI布局、按钮、地图、数据面板全部初始化）
     MainWindow window;
-    // 显示主界面
     window.show();
 
-    // 实例化视觉控制器：接管视觉线程的所有启停、资源管理逻辑
-    gonxun::VisionController controller(&visionSystem);
+    // 创建【视觉线程控制器】（管理子线程启停）
+    // 绑定上层视觉算法系统，实现线程解耦
+    gonxun::VisionController controller(&vision_system);
 
-    // Qt信号槽绑定：UI界面 与 视觉控制器解耦通信
-    // 界面点击【启动视觉】按钮 -> 触发控制器启动视觉线程
-    QObject::connect(&window, &MainWindow::visionStartRequested, &controller, &gonxun::VisionController::start);
-    // 界面点击【停止视觉】按钮 -> 触发控制器停止视觉线程
-    QObject::connect(&window, &MainWindow::visionStopRequested, &controller, &gonxun::VisionController::stop);
+    // ===================== 7. 核心信号槽绑定：UI ↔ 视觉线程 =====================
+    /**
+     * 链路：用户点击UI按钮 ==> 发射信号 ==> 控制后台算法线程
+     * 完全解耦：UI不知道线程细节，线程不知道UI细节
+     */
+    // UI点击【开始】 --> 启动视觉子线程（相机采集+算法循环）
+    QObject::connect(&window, &MainWindow::vision_start_requested,
+                     &controller, &gonxun::VisionController::start);
+    // UI点击【停止】 --> 终止视觉子线程、安全回收资源
+    QObject::connect(&window, &MainWindow::vision_stop_requested,
+                     &controller, &gonxun::VisionController::stop);
 
-    // ========== 9. 启动Qt事件循环（程序主循环） ==========
-    // 阻塞执行，监听界面点击、信号触发、窗口事件
+    // ===================== 8. Qt主线程事件循环（程序常驻） =====================
+    // 阻塞式运行，监听UI点击、信号、刷新、所有事件
     int ret = app.exec();
 
-    // ========== 10. 程序退出收尾：安全释放资源 ==========
-    // 主动停止视觉子线程，回收摄像头、算法资源
+    // ===================== 9. 程序退出安全收尾 =====================
+    // 主动停止视觉线程，防止子线程残留、内存泄漏、相机占用
     controller.stop();
-    // 标记全局程序退出状态，终止所有后台循环
-    gonxun::requestExit();
+    // 通知全局系统退出，关闭串口、相机、释放资源
+    gonxun::request_exit();
 
-    std::cout << "[Main] 系统安全退出，资源已全部释放" << std::endl;
+    std::cout << "[Main] 系统安全退出" << std::endl;
     return ret;
 }

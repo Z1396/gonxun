@@ -1,40 +1,35 @@
 CompileFlags:
   CompilationDatabase: build
-  Add:
-    - "-I/home/pldx/Desktop/gonxun/core/include"
-    - "-I/home/pldx/Desktop/gonxun/vision_cpp/include"
-    - "-I/home/pldx/Desktop/gonxun/gui/include"
-    - "-I/home/pldx/Desktop/gonxun/config/include"
-    - "-I/usr/local/include/opencv4"
-    - "-I/usr/include/eigen3"
-    - "-I/usr/include/aarch64-linux-gnu"
-    # Qt5 头文件路径
-    - "-I/usr/include/x86_64-linux-gnu/qt5"
-    - "-I/usr/include/x86_64-linux-gnu/qt5/QtCore"
-    - "-I/usr/include/x86_64-linux-gnu/qt5/QtGui"
-    - "-I/usr/include/x86_64-linux-gnu/qt5/QtWidgets"
-    - "-std=c++17"
-    - "-Wall"
-    - "-Wextra"
-    # Qt 宏定义
-    - "-DQT_CORE_LIB"
-    - "-DQT_GUI_LIB"
-    - "-DQT_WIDGETS_LIB"
-    - "-DYAML_CPP_AVAILABLE=1"
-  Remove:
-    - "-Werror"
-    - "-Wunknown-warning-option"
-    - "-Wreorder"
 
 Diagnostics:
-  UnusedIncludes: None
-  MissingIncludes: None
   Suppress:
     - pp_file_not_found
-    - pp_through_undef
-    - pp_unmatched_endif
-    - reorder
+    - drv_unknown_argument
     - unused-parameter
-
-# 项目根目录 clangd 配置
-# compile_commands.json 位于 build/ 目录
+    - unused-variable
+    - unused-function
+    - reorder
+    - c++2b-extensions
+    - clang-diagnostic-unused-parameter
+    - clang-diagnostic-unused-variable
+    - clang-diagnostic-unused-function
+    - clang-diagnostic-reorder
+    - readability-identifier-naming
+    - readability-braces-around-statements
+    - readability-implicit-bool-conversion
+    - readability-redundant-access-specifiers
+    - readability-make-member-function-const
+    - modernize-use-auto
+    - modernize-use-transparent-functors
+    - cppcoreguidelines-owning-memory
+    - cppcoreguidelines-special-member-functions
+    - cppcoreguidelines-pro-bounds-constant-array-index
+    - cppcoreguidelines-pro-bounds-array-to-pointer-decay
+    - cppcoreguidelines-non-private-member-variables-in-classes
+    - hicpp-special-member-functions
+    - hicpp-no-array-decay
+    - cert-err58-cpp
+    - misc-non-private-member-variables-in-classes
+    - bugprone-easily-swappable-parameters
+    - bugprone-narrowing-conversions
+    - bugprone-exception-escape

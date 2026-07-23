@@ -1,495 +1,345 @@
-/**
- * @file touchhandler.cpp
- * @brief 触摸事件处理器实现文件
- * 
- * @details 本文件实现了触摸屏手势识别和处理功能。
- *          核心功能：
- *          - 手势识别：单击、双击、长按、滑动、缩放
- *          - 定时器机制：长按计时、双击判定窗口
- *          - 参数配置：点击半径、长按时长、滑动距离、双击间隔
- *          
- *          手势判定规则：
- *          - 单击：触摸按下后移动距离 < tapRadius，抬起时判定
- *          - 双击：两次单击间隔 < doubleTapInterval，位置相近
- *          - 长按：触摸按下后保持不动 > longPressDuration
- *          - 滑动：触摸按下后移动距离 > swipeDistance
- *          - 缩放：双指距离变化判定
- *          
- *          定时器机制：
- *          - m_longPressTimer：长按计时器（单次触发）
- *          - m_tapTimer：双击判定窗口定时器（单次触发）
- *          
- *          使用方式：
- *          @code
- *          TouchHandler* handler = new TouchHandler(this);
- *          connect(handler, &TouchHandler::singleTap, [](QPointF pos) {
- *              qDebug() << "Single tap at" << pos;
- *          });
- *          // 在 touchEvent() 中调用
- *          handler->processTouchEvent(event);
- *          @endcode
- *          
- *          注意事项：
- *          - 适配5/7寸触控屏，参数已优化
- *          - 支持多指触摸（缩放手势）
- *          - 定时器使用 Qt::PreciseTimer 提高精度
- *          
- * @see touchhandler.h 头文件定义
- * @see courtmapwidget.cpp 使用此处理器的地图控件
- * 
- * @author 工创赛2025智能物流搬运系统团队
- * @date 2024-01-15
- * @version 1.0.0
- * @history 2024-01-15 初始版本
- * @history 2024-02-10 新增缩放手势支持
- * 
- * @copyright 工创赛2025智能物流搬运系统
- */
-#include "touchhandler.h"
+/// @file touchhandler.cpp
+/// @brief 触摸事件处理器实现，包含鼠标/触摸事件到内部TouchPoint的映射、
+///        定时器驱动的长按/双击判定，以及双指捏合/旋转检测。
+
+#include "touchhandler.hpp"
+
 #include <QDateTime>
 #include <QTouchEvent>
-#include <math.h>
+#include <cmath>
 
-/**
- * @brief 构造函数：初始化手势处理器、定时器、默认参数与状态
- * @param parent 父对象，用于Qt对象树内存管理
- */
-TouchHandler::TouchHandler(QObject *parent)
+/// @brief 构造手势处理器：初始化定时器与默认阈值参数。
+TouchHandler::TouchHandler(QObject *parent) noexcept
     : QObject(parent)
-    // 初始化当前手势状态：无手势
-    , m_currentGesture(NoGesture)
-    // 点击判定半径：触摸/鼠标移动小于该值判定为点击，而非滑动
-    , m_tapRadius(20)
-    // 点击延迟阈值（备用参数）
-    , m_tapDelay(200)
-    // 长按判定时长：按压超过800ms判定为长按
-    , m_longPressDuration(800)
-    // 滑动判定距离：移动距离超过50px判定为滑动手势
-    , m_swipeDistance(50)
-    // 双击间隔阈值：两次点击间隔小于300ms判定为双击
-    , m_doubleTapInterval(300)
-    // 长按状态标记：默认未触发长按
-    , m_isLongPress(false)
-    // 双击状态标记：默认未触发双击
-    , m_isDoubleTap(false)
+    , current_gesture_(NoGesture)
+    , tap_radius_(20)
+    , tap_delay_(200)
+    , long_press_duration_(800)
+    , swipe_distance_(50)
+    , double_tap_interval_(300)
+    , is_long_press_(false)
+    , is_double_tap_(false)
 {
-    // ====================== 长按定时器初始化 ======================
-    m_longPressTimer = new QTimer(this);
-    // 设置为单次触发：只计时一次，不会循环触发
-    m_longPressTimer->setSingleShot(true);
-    // 设置长按定时时长800ms
-    m_longPressTimer->setInterval(m_longPressDuration);
-    // 绑定定时器超时信号：时长结束触发长按槽函数
-    connect(m_longPressTimer, &QTimer::timeout, this, &TouchHandler::onLongPressTimer);
+    // 长按判定定时器：超时即触发长按手势
+    long_press_timer_ = new QTimer(this);
+    long_press_timer_->setSingleShot(true);
+    long_press_timer_->setInterval(long_press_duration_);
+    connect(long_press_timer_, &QTimer::timeout, this, &TouchHandler::on_long_press_timer);
 
-    // ====================== 双击判定定时器初始化 ======================
-    m_tapTimer = new QTimer(this);
-    // 单次触发：用于等待双击判定窗口期
-    m_tapTimer->setSingleShot(true);
-    // 双击判定窗口期300ms
-    m_tapTimer->setInterval(m_doubleTapInterval);
-    // 定时结束后判定：窗口期内无第二次点击则判定为单击
-    connect(m_tapTimer, &QTimer::timeout, this, &TouchHandler::onTapTimer);
+    // 单击判定定时器：双击间隔内无第二次点击则确认单击
+    tap_timer_ = new QTimer(this);
+    tap_timer_->setSingleShot(true);
+    tap_timer_->setInterval(double_tap_interval_);
+    connect(tap_timer_, &QTimer::timeout, this, &TouchHandler::on_tap_timer);
 
-    // 初始化上一次点击的时间戳（毫秒级时间）
-    m_lastTapTime = 0;
+    last_tap_time_ = 0;
 }
 
-/**
- * @brief 析构函数
- * @note 定时器由this为父对象，Qt自动回收内存，无需手动释放
- */
 TouchHandler::~TouchHandler()
 {
 }
 
-/**
- * @brief 统一处理原生触摸屏触摸事件
- * @param event Qt触摸事件对象
- * @return bool 事件是否被当前处理器处理（true=已处理）
- */
-bool TouchHandler::processTouchEvent(QTouchEvent *event)
+/// @brief 处理触摸事件：根据TouchBegin/Update/End分发到对应处理函数。
+/// @param event 触摸事件
+/// @return true 事件已处理
+bool TouchHandler::process_touch_event(QTouchEvent *event)
 {
-    // 空指针防护
     if (!event) return false;
 
-    // 根据触摸事件类型分发处理
     switch (event->type()) {
-    // 触摸按下（手指接触屏幕）
     case QEvent::TouchBegin:
-        handleTouchBegin(event->touchPoints());
+        handle_touch_begin(event->touchPoints());
         return true;
-    // 触摸移动（手指在屏幕滑动）
     case QEvent::TouchUpdate:
-        handleTouchUpdate(event->touchPoints());
+        handle_touch_update(event->touchPoints());
         return true;
-    // 触摸抬起（手指离开屏幕）
     case QEvent::TouchEnd:
-        handleTouchEnd(event->touchPoints());
+        handle_touch_end(event->touchPoints());
         return true;
-    // 其他触摸事件忽略
     default:
         break;
     }
     return false;
 }
 
-/**
- * @brief 兼容处理鼠标事件（用鼠标模拟触控手势）
- * @param event 鼠标事件对象
- * @return bool 事件是否被处理
- * @note 适配无触屏设备，鼠标左键按压=触摸按下，移动=触摸滑动，松开=触摸抬起
- */
-bool TouchHandler::processMouseEvent(QMouseEvent *event)
+/// @brief 处理鼠标事件：将鼠标Press/Move/Release映射为单指触摸。
+///        Press记录起点并启动长按定时器；Release时根据距离判定点击/双击/滑动。
+/// @param event 鼠标事件
+/// @return true 事件已处理
+bool TouchHandler::process_mouse_event(QMouseEvent *event)
 {
     if (!event) return false;
 
-    // 获取当前系统时间戳（毫秒），用于时间间隔计算
     qint64 now = QDateTime::currentMSecsSinceEpoch();
 
     switch (event->type()) {
-    // 鼠标左键按下：模拟触摸按下
     case QEvent::MouseButtonPress: {
-        // 自定义触摸点结构体，存储鼠标触控信息
+        // 记录按下位置，启动长按定时器
         TouchPoint tp;
-        tp.id = 0; // 鼠标固定单点ID=0
-        tp.startPos = event->pos(); // 按压起始坐标
-        tp.currentPos = event->pos(); // 当前坐标
-        tp.startTime = now; // 按压时间
+        tp.id = 0;
+        tp.start_pos = event->pos();
+        tp.current_pos = event->pos();
+        tp.start_time = now;
 
-        // 清空历史触控点，保存当前鼠标触控点
-        m_touchPoints.clear();
-        m_touchPoints.append(tp);
+        touch_points_.clear();
+        touch_points_.append(tp);
 
-        // 重置手势状态、长按标记
-        m_currentGesture = NoGesture;
-        m_isLongPress = false;
+        current_gesture_ = NoGesture;
+        is_long_press_ = false;
 
-        // 启动长按定时器，开始计时
-        m_longPressTimer->start();
+        long_press_timer_->start();
 
-        // 抛出按压信号，对外通知按下事件
-        emit touchPressed(event->pos(), 0);
+        emit touch_pressed(event->pos(), 0);
         return true;
     }
-    // 鼠标移动：模拟触摸滑动
     case QEvent::MouseMove: {
-        // 存在有效触控点时更新坐标
-        if (m_touchPoints.size() > 0) {
-            m_touchPoints[0].currentPos = event->pos();
-            // 抛出移动信号
-            emit touchMoved(event->pos(), 0);
+        // 更新位置，移动超阈值则取消长按
+        if (touch_points_.size() > 0) {
+            touch_points_[0].current_pos = event->pos();
+            emit touch_moved(event->pos(), 0);
 
-            // 若移动距离超过点击半径，判定为滑动，终止长按判定
-            if (distance(m_touchPoints[0].startPos, m_touchPoints[0].currentPos) > m_tapRadius) {
-                m_longPressTimer->stop();
+            if (distance(touch_points_[0].start_pos, touch_points_[0].current_pos) > tap_radius_) {
+                long_press_timer_->stop();
             }
         }
         return true;
     }
-    // 鼠标左键松开：模拟触摸抬起，核心手势判定逻辑
     case QEvent::MouseButtonRelease: {
-        if (m_touchPoints.size() > 0) {
-            // 停止长按计时
-            m_longPressTimer->stop();
-            // 抛出抬起信号
-            emit touchReleased(event->pos(), 0);
+        if (touch_points_.size() > 0) {
+            long_press_timer_->stop();
+            emit touch_released(event->pos(), 0);
 
-            // 未触发长按，判定为点击/滑动手势
-            if (!m_isLongPress) {
-                // 获取按压起始坐标和抬起结束坐标
-                QPointF start = m_touchPoints[0].startPos;
+            if (!is_long_press_) {
+                QPointF start = touch_points_[0].start_pos;
                 QPointF end = event->pos();
-                // 计算按压全程移动距离
                 qreal dist = distance(start, end);
 
-                // 距离小于点击半径：判定为点击类手势（单击/双击）
-                if (dist < m_tapRadius) {
-                    // 计算与上一次点击的时间间隔
-                    qint64 timeDelta = now - m_lastTapTime;
-                    // 满足双击条件：时间间隔达标 + 两次点击位置基本一致
-                    if (timeDelta < m_doubleTapInterval && distance(m_lastTapPos, end) < m_tapRadius) {
-                        m_isDoubleTap = true;
-                        m_currentGesture = DoubleTap;
-                        // 抛出双击信号
-                        emit doubleTapDetected(event->pos());
-                        emit gestureDetected(DoubleTap);
-                        // 停止单击定时器，避免触发单击
-                        m_tapTimer->stop();
+                if (dist < tap_radius_) {
+                    // 移动距离小→判定为点击，检查双击
+                    qint64 time_delta = now - last_tap_time_;
+                    if (time_delta < double_tap_interval_ && distance(last_tap_pos_, end) < tap_radius_) {
+                        // 双击：位置接近且时间间隔短
+                        is_double_tap_ = true;
+                        current_gesture_ = DoubleTap;
+                        emit double_tap_detected(event->pos());
+                        emit gesture_detected(DoubleTap);
+                        tap_timer_->stop();
                     } else {
-                        // 不满足双击：记录本次点击信息，启动单击定时器
-                        m_lastTapPos = end;
-                        m_lastTapTime = now;
-                        m_tapTimer->start();
+                        // 可能是单击，等待双击超时确认
+                        last_tap_pos_ = end;
+                        last_tap_time_ = now;
+                        tap_timer_->start();
                     }
                 }
-                // 移动距离超过滑动阈值：判定为滑动手势
-                else if (dist > m_swipeDistance) {
-                    // 识别滑动方向
-                    GestureType swipe = detectSwipe(start, end);
-                    m_currentGesture = swipe;
-                    // 抛出滑动信号
-                    emit swipeDetected(swipe);
-                    emit gestureDetected(swipe);
+                else if (dist > swipe_distance_) {
+                    // 移动距离大→判定为滑动
+                    GestureType swipe = detect_swipe(start, end);
+                    current_gesture_ = swipe;
+                    emit swipe_detected(swipe);
+                    emit gesture_detected(swipe);
                 }
             }
 
-            // 清空触控点，结束本次手势
-            m_touchPoints.clear();
+            touch_points_.clear();
         }
         return true;
     }
-    // 其他鼠标事件忽略
     default:
         break;
     }
     return false;
 }
 
-/**
- * @brief 长按定时器超时槽函数：触发长按手势
- * @note 定时器计时结束且触控点未松开，判定为长按
- */
-void TouchHandler::onLongPressTimer()
+/// @brief 长按定时器回调：若仍有触摸点，判定为长按手势。
+void TouchHandler::on_long_press_timer()
 {
-    // 存在有效触控点，说明持续按压未松开
-    if (m_touchPoints.size() > 0) {
-        m_isLongPress = true; // 标记长按触发
-        m_currentGesture = LongPress; // 更新当前手势
-        // 抛出长按信号，携带长按坐标
-        emit longPressDetected(m_touchPoints[0].currentPos.toPoint());
-        emit gestureDetected(LongPress);
+    if (touch_points_.size() > 0) {
+        is_long_press_ = true;
+        current_gesture_ = LongPress;
+        emit long_press_detected(touch_points_[0].current_pos.toPoint());
+        emit gesture_detected(LongPress);
     }
 }
 
-/**
- * @brief 单击定时器超时槽函数：判定为单击手势
- * @note 双击窗口期结束，无第二次点击则触发单击
- */
-void TouchHandler::onTapTimer()
+/// @brief 点击定时器回调：超时且无双击则确认为单击。
+void TouchHandler::on_tap_timer()
 {
-    // 未触发双击、且手势已结束，判定为普通单击
-    if (!m_isDoubleTap && m_touchPoints.isEmpty()) {
-        m_currentGesture = Tap;
-        // 抛出单击信号
-        emit tapDetected(m_lastTapPos.toPoint());
-        emit gestureDetected(Tap);
+    if (!is_double_tap_ && touch_points_.isEmpty()) {
+        current_gesture_ = Tap;
+        emit tap_detected(last_tap_pos_.toPoint());
+        emit gesture_detected(Tap);
     }
-    // 重置双击标记，等待下一次手势
-    m_isDoubleTap = false;
+    is_double_tap_ = false;
 }
 
-/**
- * @brief 处理触摸按下事件（真实触屏）
- * @param points 屏幕按压的所有触摸点（支持多指触控）
- */
-void TouchHandler::handleTouchBegin(const QList<QTouchEvent::TouchPoint> &points)
+/// @brief 处理触摸开始：记录所有触摸点，单指时启动长按定时器。
+void TouchHandler::handle_touch_begin(const QList<QTouchEvent::TouchPoint> &points)
 {
-    // 清空历史触控数据，重置状态
-    m_touchPoints.clear();
-    m_currentGesture = NoGesture;
-    m_isLongPress = false;
+    touch_points_.clear();
+    current_gesture_ = NoGesture;
+    is_long_press_ = false;
     qint64 now = QDateTime::currentMSecsSinceEpoch();
 
-    // 遍历所有触摸点（支持多指同时按下）
     for (int i = 0; i < points.size(); ++i) {
         TouchPoint tp;
-        tp.id = points[i].id(); // 触摸点唯一ID（区分多指）
-        tp.startPos = points[i].pos(); // 按压起始坐标
-        tp.currentPos = points[i].pos(); // 当前坐标
-        tp.startTime = now; // 按压时间
-        m_touchPoints.append(tp);
-        // 逐点抛出按压信号
-        emit touchPressed(points[i].pos().toPoint(), tp.id);
+        tp.id = points[i].id();
+        tp.start_pos = points[i].pos();
+        tp.current_pos = points[i].pos();
+        tp.start_time = now;
+        touch_points_.append(tp);
+        emit touch_pressed(points[i].pos().toPoint(), tp.id);
     }
 
-    // 单指按压：启动长按定时器（多指不触发长按）
-    if (m_touchPoints.size() == 1) {
-        m_longPressTimer->start();
+    // 单指触摸启动长按判定
+    if (touch_points_.size() == 1) {
+        long_press_timer_->start();
     }
 }
 
-/**
- * @brief 处理触摸移动事件（真实触屏滑动）
- * @param points 当前所有移动的触摸点
- */
-void TouchHandler::handleTouchUpdate(const QList<QTouchEvent::TouchPoint> &points)
+/// @brief 处理触摸更新：更新各触摸点位置，单指移动超阈值取消长按，
+///        双指时调用detect_gesture()检测捏合/旋转。
+void TouchHandler::handle_touch_update(const QList<QTouchEvent::TouchPoint> &points)
 {
-    // 更新所有触摸点的实时坐标
+    // 按ID匹配更新位置
     for (int i = 0; i < points.size(); ++i) {
-        for (int j = 0; j < m_touchPoints.size(); ++j) {
-            // 根据ID匹配对应触摸点，更新坐标
-            if (m_touchPoints[j].id == points[i].id()) {
-                m_touchPoints[j].currentPos = points[i].pos();
-                emit touchMoved(points[i].pos().toPoint(), m_touchPoints[j].id);
+        for (int j = 0; j < touch_points_.size(); ++j) {
+            if (touch_points_[j].id == points[i].id()) {
+                touch_points_[j].current_pos = points[i].pos();
+                emit touch_moved(points[i].pos().toPoint(), touch_points_[j].id);
                 break;
             }
         }
     }
 
-    // 单指滑动：位移超过点击半径，取消长按判定
-    if (m_touchPoints.size() == 1) {
-        if (distance(m_touchPoints[0].startPos, m_touchPoints[0].currentPos) > m_tapRadius) {
-            m_longPressTimer->stop();
+    // 单指：移动超阈值取消长按
+    if (touch_points_.size() == 1) {
+        if (distance(touch_points_[0].start_pos, touch_points_[0].current_pos) > tap_radius_) {
+            long_press_timer_->stop();
         }
     }
 
-    // 双指触控：触发双指手势检测（缩放、旋转）
-    if (m_touchPoints.size() == 2) {
-        detectGesture();
+    // 双指：检测捏合/旋转
+    if (touch_points_.size() == 2) {
+        detect_gesture();
     }
 }
 
-/**
- * @brief 处理触摸抬起事件（真实触屏松手）
- * @param points 抬起的触摸点
- */
-void TouchHandler::handleTouchEnd(const QList<QTouchEvent::TouchPoint> &points)
+/// @brief 处理触摸结束：停止长按定时器，单指释放时判定点击/双击/滑动。
+void TouchHandler::handle_touch_end(const QList<QTouchEvent::TouchPoint> &points)
 {
-    // 停止长按计时
-    m_longPressTimer->stop();
+    long_press_timer_->stop();
 
-    // 逐点抛出抬起信号
     for (int i = 0; i < points.size(); ++i) {
-        emit touchReleased(points[i].pos().toPoint(), points[i].id());
+        emit touch_released(points[i].pos().toPoint(), points[i].id());
     }
 
     qint64 now = QDateTime::currentMSecsSinceEpoch();
 
-    // 单指手势结束、未触发长按：判定单击/双击/滑动
-    if (m_touchPoints.size() == 1 && !m_isLongPress) {
-        QPointF start = m_touchPoints[0].startPos;
-        QPointF end = m_touchPoints[0].currentPos;
+    // 单指释放且非长按：根据移动距离判定手势
+    if (touch_points_.size() == 1 && !is_long_press_) {
+        QPointF start = touch_points_[0].start_pos;
+        QPointF end = touch_points_[0].current_pos;
         qreal dist = distance(start, end);
 
-        // 点击类手势
-        if (dist < m_tapRadius) {
-            qint64 timeDelta = now - m_lastTapTime;
-            // 双击判定
-            if (timeDelta < m_doubleTapInterval && distance(m_lastTapPos, end) < m_tapRadius) {
-                m_isDoubleTap = true;
-                m_currentGesture = DoubleTap;
-                emit doubleTapDetected(end.toPoint());
-                emit gestureDetected(DoubleTap);
-                m_tapTimer->stop();
+        if (dist < tap_radius_) {
+            // 点击/双击判定（同鼠标处理逻辑）
+            qint64 time_delta = now - last_tap_time_;
+            if (time_delta < double_tap_interval_ && distance(last_tap_pos_, end) < tap_radius_) {
+                is_double_tap_ = true;
+                current_gesture_ = DoubleTap;
+                emit double_tap_detected(end.toPoint());
+                emit gesture_detected(DoubleTap);
+                tap_timer_->stop();
             }
-            // 等待双击窗口期，判定单击
             else {
-                m_lastTapPos = end;
-                m_lastTapTime = now;
-                m_tapTimer->start();
+                last_tap_pos_ = end;
+                last_tap_time_ = now;
+                tap_timer_->start();
             }
         }
-        // 滑动手势判定
-        else if (dist > m_swipeDistance) {
-            GestureType swipe = detectSwipe(start, end);
-            m_currentGesture = swipe;
-            emit swipeDetected(swipe);
-            emit gestureDetected(swipe);
+        else if (dist > swipe_distance_) {
+            // 滑动判定
+            GestureType swipe = detect_swipe(start, end);
+            current_gesture_ = swipe;
+            emit swipe_detected(swipe);
+            emit gesture_detected(swipe);
         }
     }
 
-    // 清空本次手势数据
-    m_touchPoints.clear();
+    touch_points_.clear();
 }
 
-/**
- * @brief 双指手势检测核心函数：识别缩放、旋转手势
- * @note 仅双指触控时生效
- */
-void TouchHandler::detectGesture()
+/// @brief 双指手势检测：根据两指距离变化率判定PinchIn/Out，
+///        根据两指连线角度变化判定Rotate。
+///        捏合阈值：比例<0.85或>1.15；旋转阈值：角度变化>15°。
+void TouchHandler::detect_gesture()
 {
-    // 非双指直接返回
-    if (m_touchPoints.size() != 2) return;
+    if (touch_points_.size() != 2) return;
 
-    // 获取双指起始、当前坐标
-    QPointF p1Start = m_touchPoints[0].startPos;
-    QPointF p2Start = m_touchPoints[1].startPos;
-    QPointF p1Current = m_touchPoints[0].currentPos;
-    QPointF p2Current = m_touchPoints[1].currentPos;
+    QPointF p1_start = touch_points_[0].start_pos;
+    QPointF p2_start = touch_points_[1].start_pos;
+    QPointF p1_current = touch_points_[0].current_pos;
+    QPointF p2_current = touch_points_[1].current_pos;
 
-    // 计算双指初始间距、当前间距
-    qreal startDist = distance(p1Start, p2Start);
-    qreal currentDist = distance(p1Current, p2Current);
+    // 捏合判定：两指距离比例
+    qreal start_dist = distance(p1_start, p2_start);
+    qreal current_dist = distance(p1_current, p2_current);
 
-    // 缩放手势判定（避免除0）
-    if (startDist > 0) {
-        // 计算缩放比例：当前间距/初始间距
-        qreal scale = currentDist / startDist;
-        // 比例小于0.85：双指缩小
+    if (start_dist > 0) {
+        qreal scale = current_dist / start_dist;
         if (scale < 0.85) {
-            m_currentGesture = PinchIn;
-            emit pinchDetected(scale);
-            emit gestureDetected(PinchIn);
+            current_gesture_ = PinchIn;
+            emit pinch_detected(scale);
+            emit gesture_detected(PinchIn);
         }
-        // 比例大于1.15：双指放大
         else if (scale > 1.15) {
-            m_currentGesture = PinchOut;
-            emit pinchDetected(scale);
-            emit gestureDetected(PinchOut);
+            current_gesture_ = PinchOut;
+            emit pinch_detected(scale);
+            emit gesture_detected(PinchOut);
         }
     }
 
-    // 旋转手势判定
-    qreal startAngle = angleBetween(p1Start, p2Start); // 初始夹角
-    qreal currentAngle = angleBetween(p1Current, p2Current); // 当前夹角
-    qreal angleDelta = currentAngle - startAngle; // 角度变化量
+    // 旋转判定：两指连线角度变化
+    qreal start_angle = angle_between(p1_start, p2_start);
+    qreal current_angle = angle_between(p1_current, p2_current);
+    qreal angle_delta = current_angle - start_angle;
 
-    // 角度变化超过15度，判定为旋转
-    if (fabs(angleDelta) > 15.0) {
-        m_currentGesture = Rotate;
-        emit rotateDetected(angleDelta);
-        emit gestureDetected(Rotate);
+    if (fabs(angle_delta) > 15.0) {
+        current_gesture_ = Rotate;
+        emit rotate_detected(angle_delta);
+        emit gesture_detected(Rotate);
     }
 }
 
-/**
- * @brief 识别滑动手势方向
- * @param start 按压起始坐标
- * @param end 抬起结束坐标
- * @return GestureType 上下左右滑动类型
- * @note 优先判断横竖方向：水平位移大=左右滑，垂直位移大=上下滑
- */
-TouchHandler::GestureType TouchHandler::detectSwipe(const QPointF &start, const QPointF &end)
+/// @brief 判定滑动方向：取位移分量较大的轴方向。
+/// @param start 起始位置
+/// @param end 结束位置
+/// @return 滑动方向枚举
+TouchHandler::GestureType TouchHandler::detect_swipe(const QPointF &start, const QPointF &end)
 {
-    // 计算X、Y轴位移差值
     qreal dx = end.x() - start.x();
     qreal dy = end.y() - start.y();
 
-    // 水平位移大于垂直：左右滑动
     if (fabs(dx) > fabs(dy)) {
         return dx > 0 ? SwipeRight : SwipeLeft;
     }
-    // 垂直位移大于水平：上下滑动
     else {
         return dy > 0 ? SwipeDown : SwipeUp;
     }
 }
 
-/**
- * @brief 计算两点之间直线距离
- * @param p1 坐标点1
- * @param p2 坐标点2
- * @return qreal 两点直线像素距离
- */
-qreal TouchHandler::distance(const QPointF &p1, const QPointF &p2) const
+/// @brief 计算两点间欧氏距离。
+qreal TouchHandler::distance(const QPointF &p1, const QPointF &p2) const noexcept
 {
     qreal dx = p2.x() - p1.x();
     qreal dy = p2.y() - p1.y();
-    // 勾股定理计算直线距离
     return sqrt(dx * dx + dy * dy);
 }
 
-/**
- * @brief 计算两点连线与X轴正方向的夹角（角度制）
- * @param p1 起点
- * @param p2 终点
- * @return qreal 夹角角度（-180~180）
- */
-qreal TouchHandler::angleBetween(const QPointF &p1, const QPointF &p2) const
+/// @brief 计算两点连线与X轴正方向的夹角(°)，使用atan2确保全象限正确。
+qreal TouchHandler::angle_between(const QPointF &p1, const QPointF &p2) const noexcept
 {
     qreal dx = p2.x() - p1.x();
     qreal dy = p2.y() - p1.y();
-    // atan2返回弧度，转换为角度
     return atan2(dy, dx) * 180.0 / M_PI;
 }

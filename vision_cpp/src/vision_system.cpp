@@ -1,215 +1,199 @@
 /**
  * @file vision_system.cpp
- * @brief 视觉系统核心调度模块实现文件
- * 
- * @details 本文件实现了智能物流搬运系统的视觉系统核心调度功能。
- *          核心功能：
- *          - 模块集成：串口通信、摄像头管理、YOLO检测、颜色检测、二维码识别
- *          - 模式分发：根据工作模式调用不同的处理函数
- *          - 坐标滤波：使用卡尔曼滤波平滑坐标数据
- *          - 数据可视化：在图像上绘制检测结果
- * 
- * @author 智能物流搬运系统开发团队
- * @version 1.0
- * @date 2025-01-01
- * 
- * @note 修改历史：
- *       - 2025-01-01: 初始版本，移植自 Python 版本 vision/system.py
- *       - 2025-02-28: 增加多颜色检测和卡尔曼滤波功能
- *       - 2025-03-25: 优化模式分发逻辑，增加异常处理
- * 
- * @note 工作模式：
- *       - MODE_COLOR (1): 三色物料检测
- *       - MODE_RING (3): 圆环检测
- *       - MODE_DOCK (4): 停靠点检测
- *       - MODE_QR (9): 二维码识别
- *       - MODE_IDLE (0): 空闲状态
- *       
- * @see vision_system.hpp
+ * @brief 视觉系统核心调度模块实现
+ *
+ * 系统顶层设计：
+ *  1. 统一初始化所有视觉子模块（串口、双相机、YOLO检测、卡尔曼滤波、圆环/二维码检测器）
+ *  2. 单帧统一入口 process_frame，根据下位机工作模式自动分发任务
+ *  3. 所有检测流程统一遵循：目标识别 -> 合法性校验 -> 卡尔曼平滑 -> 画面渲染 -> 串口上报
+ *  4. 全覆盖异常捕获，单模式报错不影响整体视觉线程运行
+ *
+ * 工作模式分发逻辑：
+ *  - MODE_COLOR: 检测红/绿/蓝三色物料 → 滤波 → 发送坐标
+ *  - MODE_RING:  检测3个定位圆环 → 滤波 → 发送坐标
+ *  - MODE_DOCK:  检测蓝/绿/红三色 → 滤波 → 发送坐标（对接停靠）
+ *  - MODE_QR:    读取扫码摄像头 → 解码 → 发送 QR 数据
  */
 #include "vision_system.hpp"
 #include "config.hpp"
-#include <iostream>
+
 #include <climits>
+#include <iostream>
 
 /**
- * @brief 构造函数，初始化视觉系统的所有模块
- * 
- * @details 初始化串口通信、摄像头管理、YOLO检测器、卡尔曼滤波器等。
- *          如果 YOLO 模型加载失败，会输出警告但仍继续运行。
- * 
- * @param serialMock 是否启用串口模拟模式
- * @param serialPort 串口设备路径（如 "/dev/ttyUSB0"）
+ * @brief VisionSystem 构造函数
+ * @param serial_mock 是否开启串口模拟模式（调试无硬件时使用）
+ * @param serial_port 自定义串口设备路径，为空则读取配置文件默认值
  * @param baudrate 串口波特率
- * @param mainCamera 主摄像头索引（用于目标检测）
- * @param qrCamera 扫码摄像头索引（用于二维码识别）
- * 
- * @note 模块初始化顺序：
- *       1. 串口通信模块（SerialComm）
- *       2. 摄像头管理模块（CameraManager）
- *       3. YOLO 检测器（YOLOv8Detector）
- *       4. 卡尔曼滤波器（KalmanFilter，共3个）
- *       
- * @note 参数默认值：
- *       - serialPort: 从 config::SERIAL_PORT 读取
- *       - mainCamera: 从 config::CAMERA_MAIN_INDEX 读取
- *       - qrCamera: 从 config::CAMERA_QR_INDEX 读取
+ * @param main_camera 主摄像头设备索引，-1 使用默认配置
+ * @param qr_camera 扫码摄像头设备索引，-1 使用默认配置
+ *
+ * 初始化模块清单：
+ *  1. 串口通信模块：负责向下位机上报视觉坐标、二维码数据
+ *  2. 双相机采集模块：主相机（物料/圆环）+ 扫码相机（二维码）
+ *  3. YOLO检测器：智能颜色目标识别
+ *  4. 三组卡尔曼滤波器：分别平滑三组目标坐标，消除抖动噪点
+ *
+ * @note 完全基于 config 配置文件参数初始化，统一项目参数管理
+ * @note 启动自检，提示YOLO模型加载状态，提前暴露初始化异常
  */
-VisionSystem::VisionSystem(bool serialMock, const std::string& serialPort,
-                           int baudrate, int mainCamera, int qrCamera)
-    // 初始化串口通信模块
-    : serialComm(serialMock,
-                 serialPort.empty() ? config::SERIAL_PORT : serialPort,  // 使用默认路径或指定路径
-                 baudrate,
-                 MODE_IDLE,                    // 初始工作模式为空闲
-                 config::SERIAL_MOCK_CYCLE),   // 是否循环测试
-      // 初始化摄像头管理模块
-      camera(mainCamera >= 0 ? mainCamera : config::CAMERA_MAIN_INDEX,  // 主摄像头索引
-             qrCamera >= 0 ? qrCamera : config::CAMERA_QR_INDEX,        // 扫码摄像头索引
-             config::CAMERA_MAIN_WIDTH, config::CAMERA_MAIN_HEIGHT,    // 主摄像头分辨率
-             config::CAMERA_QR_WIDTH, config::CAMERA_QR_HEIGHT),       // 扫码摄像头分辨率
-      // 初始化 YOLO 检测器
-      m_yoloDetector(config::YOLO_TS_MODEL_PATH,       // TensorRT 模型路径
-                     config::YOLO_IMGSZ,              // 输入图像尺寸
-                     config::YOLO_CONF_THRESHOLD),   // 置信度阈值
-      // 初始化卡尔曼滤波器（共3个，用于三色坐标滤波）
-      m_kalmanFilters{
-          KalmanFilter(config::KALMAN_Q, config::KALMAN_R),  // 第1个卡尔曼滤波器
-          KalmanFilter(config::KALMAN_Q, config::KALMAN_R),  // 第2个卡尔曼滤波器
-          KalmanFilter(config::KALMAN_Q, config::KALMAN_R)   // 第3个卡尔曼滤波器
+VisionSystem::VisionSystem(bool serial_mock, const std::string& serial_port,
+                           int baudrate, int main_camera, int qr_camera)
+    // 初始化串口通信：自定义参数兜底，无参数使用全局配置
+    : serial_comm(serial_mock,
+                  serial_port.empty() ? config::SERIAL_PORT : serial_port,
+                  baudrate,
+                  MODE_IDLE,
+                  config::SERIAL_MOCK_CYCLE),
+    // 初始化双相机：分辨率、设备索引全部读取配置文件
+      camera(main_camera >= 0 ? main_camera : config::CAMERA_MAIN_INDEX,
+             qr_camera >= 0 ? qr_camera : config::CAMERA_QR_INDEX,
+             config::CAMERA_MAIN_WIDTH, config::CAMERA_MAIN_HEIGHT,
+             config::CAMERA_QR_WIDTH, config::CAMERA_QR_HEIGHT),
+    // 初始化YOLO颜色检测模型：模型路径、输入尺寸、置信度阈值取自配置
+      yolo_detector_(config::YOLO_TS_MODEL_PATH,
+                     config::YOLO_IMGSZ,
+                     config::YOLO_CONF_THRESHOLD),
+    // 初始化三组卡尔曼滤波器，分别对应三组检测目标
+      kalman_filters_{
+          KalmanFilter(config::KALMAN_Q, config::KALMAN_R),
+          KalmanFilter(config::KALMAN_Q, config::KALMAN_R),
+          KalmanFilter(config::KALMAN_Q, config::KALMAN_R)
       } {
 
     std::cout << "VisionSystem 初始化完成" << std::endl;
-    
-    // 检查 YOLO 模型是否加载成功
-    if (!m_yoloDetector.isAvailable()) {
+
+    // 模型加载自检，提前预警检测功能异常
+    if (!yolo_detector_.is_available()) {
         std::cerr << "[警告] YOLO 模型未加载，颜色检测功能不可用" << std::endl;
     }
 }
 
+/// @brief 设置当前任务码，用于动态颜色检测
+void VisionSystem::set_task_code(const TaskCode& task_code) {
+    current_task_ = task_code;
+    task_set_ = true;
+}
+
+/// @brief 设置当前批次 (1 或 2)
+void VisionSystem::set_current_batch(int batch) {
+    current_batch_ = (batch == 1 || batch == 2) ? batch : 1;
+}
+
 /**
- * @brief 使用卡尔曼滤波平滑坐标
- * 
- * @details 对检测到的原始坐标进行卡尔曼滤波，减少噪声和抖动。
- *          每种颜色使用独立的卡尔曼滤波器。
- * 
- * @param x X坐标（像素）
- * @param y Y坐标（像素）
- * @param kfIndex 卡尔曼滤波器索引（0, 1, 2）
- * 
- * @return std::pair<int, int> 滤波后的坐标 (x, y)
- * 
- * @note 卡尔曼滤波参数：
- *       - Q: 过程噪声协方差（控制平滑度）
- *       - R: 测量噪声协方差（控制响应速度）
- *       
- * @see KalmanFilter::filter()
+ * @brief 单目标坐标卡尔曼滤波平滑函数
+ * @param x 原始检测X坐标
+ * @param y 原始检测Y坐标
+ * @param kf_index 滤波器索引 0~2，对应三组独立目标
+ * @return std::pair<int, int> 整型平滑后坐标
+ *
+ * 核心作用：
+ *  1. 抑制相机抖动、识别噪点导致的坐标跳变
+ *  2. 三组目标独立滤波，互不干扰
+ *  3. 浮点滤波计算 + 整型输出，适配下位机指令格式
  */
-std::pair<int, int> VisionSystem::filterPosition(float x, float y, int kfIndex) {
-    // 构建观测向量 [x, y]
+std::pair<int, int> VisionSystem::filter_position(float x, float y, int kf_index) {
+    // 构造二维观测矩阵 (X,Y)
     cv::Matx21f z(x, y);
-    
-    // 进行卡尔曼滤波
-    auto filtered = m_kalmanFilters[kfIndex].filter(z);
-    
-    // 返回滤波后的整数坐标
+    // 卡尔曼迭代滤波，输出平滑后坐标
+    auto filtered = kalman_filters_[kf_index].filter(z);
+    // 转为整型坐标，适配串口协议
     return {static_cast<int>(filtered(0)), static_cast<int>(filtered(1))};
 }
 
 /**
- * @brief 检测三种颜色的目标中心点
- * 
- * @details 对三种颜色分别进行检测，如果任意颜色缺失则返回空。
- *          检测结果经过卡尔曼滤波后绘制在图像上。
- * 
- * @param img 输入图像（会被修改，绘制检测结果）
- * @param colorSpecs 颜色配置列表
- *        - 格式：<颜色名, 标签, 绘制颜色(BGR)>
- *        - 示例：{"red", "R", cv::Scalar(0, 0, 255)}
- * @param minArea 最小检测面积（像素）
- * @param maxArea 最大检测面积（像素）
- * 
- * @return std::vector<std::pair<int, int>> 检测到的三个中心点坐标
- *         - 成功：返回3个坐标
- *         - 失败：返回空向量
- * 
- * @note 检测流程：
- *       1. 对每种颜色调用 YOLO 检测器
- *       2. 如果任意颜色未检测到，立即返回空
- *       3. 对三个坐标分别进行卡尔曼滤波
- *       4. 在图像上绘制检测结果（圆圈 + 标签）
- *       
- * @see YOLOv8Detector::detectCenter(), filterPosition()
+ * @brief 通用三色目标检测、滤波、渲染工具函数（高度复用）
+ * @param img 输入原图，函数内部直接绘制标注
+ * @param color_specs 颜色配置数组：(颜色识别名, 显示标签, BGR绘制颜色)
+ * @param min_area 目标最小面积，过滤噪点小色块
+ * @param max_area 目标最大面积，过滤超大干扰区域
+ * @return std::vector<std::pair<int, int>> 三组滤波后坐标，检测失败返回空数组
+ *
+ * 核心逻辑：
+ *  1. 遍历配置的三种颜色，逐一检测目标中心
+ *  2. 任意一个颜色检测缺失，直接返回空（保证三组目标完整才上报）
+ *  3. 对三组坐标分别独立卡尔曼平滑
+ *  4. 在原图绘制中心点+文字标签，用于UI可视化预览
+ *
+ * @note 强一致性校验：必须同时识别到三个目标，才执行后续上报，避免单目标异常
  */
-std::vector<std::pair<int, int>> VisionSystem::detectThreeColors(
+std::vector<std::pair<int, int>> VisionSystem::detect_three_colors(
     cv::Mat& img,
-    const std::vector<std::tuple<std::string, std::string, cv::Scalar>>& colorSpecs,
-    int minArea, int maxArea) {
+    const std::vector<std::tuple<std::string, std::string, cv::Scalar>>& color_specs,
+    int min_area, int max_area) {
 
-    // 存储原始检测坐标
     std::vector<std::pair<int, int>> positions;
-    
-    // 步骤 1: 对每种颜色进行检测
-    for (const auto& [color, label, drawColor] : colorSpecs) {
-        auto pos = m_yoloDetector.detectCenter(img, color, minArea, maxArea);
-        if (!pos) return {};  // 任意颜色缺失，返回空
+
+    // 逐一检测指定颜色目标
+    for (const auto& [color, label, draw_color] : color_specs) {
+        // YOLO检测目标中心，带面积阈值过滤
+        auto pos = yolo_detector_.detect_center(img, color, min_area, max_area);
+        // 任一目标缺失，直接返回空，放弃本次帧上报
+        if (!pos) return {};
         positions.push_back({pos->x, pos->y});
     }
 
-    // 步骤 2: 卡尔曼滤波 + 绘制
+    // 对三组原始坐标分别滤波平滑
     std::vector<std::pair<int, int>> filtered;
     for (size_t idx = 0; idx < positions.size(); ++idx) {
-        // 对坐标进行卡尔曼滤波
-        auto [fx, fy] = filterPosition(
+        auto [fx, fy] = filter_position(
             static_cast<float>(positions[idx].first),
             static_cast<float>(positions[idx].second),
             static_cast<int>(idx));
         filtered.push_back({fx, fy});
 
-        // 在图像上绘制检测结果
-        const auto& [color, label, drawColor] = colorSpecs[idx];
-        cv::circle(img, cv::Point(fx, fy), 8, drawColor, -1);  // 绘制圆圈
+        // 画面可视化渲染：实心圆点 + 字符标签
+        const auto& [color, label, draw_color] = color_specs[idx];
+        cv::circle(img, cv::Point(fx, fy), 8, draw_color, -1);
         cv::putText(img, label, cv::Point(fx - 5, fy - 15),
-                    cv::FONT_HERSHEY_SIMPLEX, 0.5, drawColor, 1);  // 绘制标签
+                    cv::FONT_HERSHEY_SIMPLEX, 0.5, draw_color, 1);
     }
-    
+
     return filtered;
 }
 
 /**
- * @brief 处理三色物料检测模式（MODE_COLOR）
- * 
- * @details 检测红、绿、蓝三种颜色的物料中心点，并通过串口发送坐标。
- *          
- * @param resultImg 结果图像（会被修改，绘制检测结果）
- * 
- * @note 检测配置：
- *       - 红色：标签 "R"，绘制颜色 (0, 0, 255)
- *       - 绿色：标签 "G"，绘制颜色 (0, 255, 0)
- *       - 蓝色：标签 "B"，绘制颜色 (255, 0, 0)
- *       - 面积范围：2000-10000 像素
- *       
- * @note 发送数据：
- *       - 命令：CMD_COLOR
- *       - 数据：三个坐标 (X1, Y1, X2, Y2, X3, Y3)
- *       
- * @see detectThreeColors(), SerialComm::sendCoordinates()
+ * @brief 物料颜色检测模式处理流程 MODE_COLOR
+ * @param result_img 待渲染图像
+ * @details
+ *  根据任务码动态选择3种颜色进行检测
+ *  流程：检测 -> 滤波平滑 -> 画面绘制 -> 串口上报 CMD_COLOR
+ *  异常防护：try-catch捕获单帧异常，不崩溃线程
  */
-void VisionSystem::processColor(cv::Mat& resultImg) {
+void VisionSystem::process_color(cv::Mat& result_img) {
     try {
-        // 三色识别配置: 颜色名, 标签, 绘制颜色(BGR)
-        std::vector<std::tuple<std::string, std::string, cv::Scalar>> colorSpecs = {
-            {"red",   "R", cv::Scalar(0, 0, 255)},    // 红色
-            {"green", "G", cv::Scalar(0, 255, 0)},    // 绿色
-            {"blue",  "B", cv::Scalar(255, 0, 0)}     // 蓝色
-        };
-        
-        // 检测三色物料中心点（面积范围：2000-10000）
-        auto filtered = detectThreeColors(resultImg, colorSpecs, 2000, 10000);
-        
-        // 如果检测成功，发送坐标
+        std::vector<std::tuple<std::string, std::string, cv::Scalar>> color_specs;
+
+        // 根据任务码获取颜色序列
+        if (task_set_) {
+            // 获取当前批次的颜色编号
+            const auto& color_codes = (current_batch_ == 1)
+                ? current_task_.batch1_colors
+                : current_task_.batch2_colors;
+
+            // 构建颜色检测规格
+            for (int code : color_codes) {
+                color_specs.emplace_back(
+                    color_code_to_name(code),
+                    color_code_to_label(code),
+                    color_code_to_bgr(code)
+                );
+            }
+        } else {
+            // 默认检测红、黄、蓝（作为备选）
+            color_specs = {
+                {"red",    "R", cv::Scalar(0, 0, 255)},
+                {"yellow", "Y", cv::Scalar(0, 255, 255)},
+                {"blue",   "B", cv::Scalar(255, 0, 0)}
+            };
+        }
+
+        // 统一调用通用三色检测模板
+        auto filtered = detect_three_colors(result_img, color_specs, 2000, 10000);
+
+        // 检测完整则通过串口上报坐标
         if (!filtered.empty()) {
-            serialComm.sendCoordinates(CMD_COLOR, filtered);
+            serial_comm.send_coordinates(CMD_COLOR, filtered);
         }
     } catch (const std::exception& e) {
         std::cerr << "unit=1处理异常: " << e.what() << std::endl;
@@ -217,96 +201,69 @@ void VisionSystem::processColor(cv::Mat& resultImg) {
 }
 
 /**
- * @brief 处理圆环检测模式（MODE_RING）
- * 
- * @details 检测三个同心圆的圆心坐标，用于判断机器人的姿态。
- *          检测结果为左、中、右三个圆心坐标。
- * 
- * @param resultImg 结果图像（会被修改，绘制检测结果）
- * 
- * @note 检测流程：
- *       1. 使用 ThreeRingDetector 检测三组圆心坐标
- *       2. 对三个圆心分别进行卡尔曼滤波
- *       3. 绘制圆圈和标签（L/M/R）
- *       4. 发送坐标到串口
- *       
- * @note 标签含义：
- *       - L: 左侧圆心
- *       - M: 中间圆心
- *       - R: 右侧圆心
- *       
- * @see ThreeRingDetector::detect(), filterPosition(), SerialComm::sendCoordinates()
+ * @brief 圆环定位检测模式处理流程 MODE_RING
+ * @param result_img 待渲染图像
+ * @details
+ *  专属三环定位算法检测三个定位圆环
+ *  三组坐标独立卡尔曼滤波
+ *  绘制青蓝色标记点，标注L/M/R左右中位置
+ *  完整检测后串口上报 CMD_RING 坐标数据
  */
-void VisionSystem::processRing(cv::Mat& resultImg) {
+void VisionSystem::process_ring(cv::Mat& result_img) {
     try {
-        // 步骤 1: 检测三组圆心坐标
-        auto circlePos = m_threeRingDetector.detect(resultImg);
-        if (!circlePos) return;  // 检测失败
+        // 调用专用圆环检测器获取三组坐标
+        auto circle_pos = three_ring_detector_.detect(result_img);
+        if (!circle_pos) return;
 
-        // 步骤 2: 拆分三组圆心坐标，卡尔曼滤波
+        // 对左、中、右三个圆环坐标分别滤波
         std::vector<std::pair<int, int>> filtered;
         for (int idx = 0; idx < 3; ++idx) {
-            // 提取圆心坐标（每两个元素为一组）
-            auto [fx, fy] = filterPosition(
-                static_cast<float>((*circlePos)[idx * 2]),     // X坐标
-                static_cast<float>((*circlePos)[idx * 2 + 1]), // Y坐标
+            auto [fx, fy] = filter_position(
+                static_cast<float>((*circle_pos)[static_cast<size_t>(idx) * 2]),
+                static_cast<float>((*circle_pos)[idx * 2 + 1]),
                 idx);
             filtered.push_back({fx, fy});
         }
 
-        // 步骤 3: 绘制 L/M/R 标签（黄色）
+        // 可视化绘制圆环定位点与标签
         const char* labels[] = {"L", "M", "R"};
         for (int i = 0; i < 3; ++i) {
-            // 绘制圆圈
-            cv::circle(resultImg, cv::Point(filtered[i].first, filtered[i].second),
+            cv::circle(result_img, cv::Point(filtered[i].first, filtered[i].second),
                        8, cv::Scalar(0, 255, 255), -1);
-            // 绘制标签
-            cv::putText(resultImg, labels[i],
+            cv::putText(result_img, labels[i],
                         cv::Point(filtered[i].first - 5, filtered[i].second - 15),
                         cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 255), 1);
         }
-        
-        // 步骤 4: 发送坐标到串口
-        serialComm.sendCoordinates(CMD_RING, filtered);
+
+        // 上报圆环定位坐标
+        serial_comm.send_coordinates(CMD_RING, filtered);
     } catch (const std::exception& e) {
         std::cerr << "unit=3处理异常: " << e.what() << std::endl;
     }
 }
 
 /**
- * @brief 处理停靠点检测模式（MODE_DOCK）
- * 
- * @details 检测停靠点的三个颜色标记（蓝、绿、红），用于引导机器人停靠。
- *          
- * @param resultImg 结果图像（会被修改，绘制检测结果）
- * 
- * @note 检测配置：
- *       - 蓝色：标签 "B"，绘制颜色 (255, 0, 0)
- *       - 绿色：标签 "G"，绘制颜色 (0, 255, 0)
- *       - 红色：标签 "R"，绘制颜色 (0, 0, 255)
- *       - 面积范围：3000-10000 像素
- *       
- * @note 与 processColor 的区别：
- *       - 颜色顺序不同（蓝-绿-红 vs 红-绿-蓝）
- *       - 面积范围不同（3000-10000 vs 2000-10000）
- *       
- * @see detectThreeColors(), SerialComm::sendCoordinates()
+ * @brief 停靠对接检测模式处理流程 MODE_DOCK
+ * @param result_img 待渲染图像
+ * @details
+ *  检测顺序：蓝、绿、红三色停靠标识
+ *  复用通用三色检测模板，调整面积阈值适配停靠目标尺寸
+ *  滤波平滑后上报 CMD_DOCK 坐标，用于机器人精准停靠
  */
-void VisionSystem::processDock(cv::Mat& resultImg) {
+void VisionSystem::process_dock(cv::Mat& result_img) {
     try {
-        // 停靠点三色识别配置（蓝-绿-红）
-        std::vector<std::tuple<std::string, std::string, cv::Scalar>> colorSpecs = {
-            {"blue",  "B", cv::Scalar(255, 0, 0)},    // 蓝色
-            {"green", "G", cv::Scalar(0, 255, 0)},    // 绿色
-            {"red",   "R", cv::Scalar(0, 0, 255)}     // 红色
+        // 停靠模式三色检测规则
+        std::vector<std::tuple<std::string, std::string, cv::Scalar>> color_specs = {
+            {"blue",  "B", cv::Scalar(255, 0, 0)},
+            {"green", "G", cv::Scalar(0, 255, 0)},
+            {"red",   "R", cv::Scalar(0, 0, 255)}
         };
-        
-        // 检测三色标记（面积范围：3000-10000）
-        auto filtered = detectThreeColors(resultImg, colorSpecs, 3000, 10000);
-        
-        // 如果检测成功，发送坐标
+
+        // 停靠目标面积更大，调整面积阈值
+        auto filtered = detect_three_colors(result_img, color_specs, 3000, 10000);
+
         if (!filtered.empty()) {
-            serialComm.sendCoordinates(CMD_DOCK, filtered);
+            serial_comm.send_coordinates(CMD_DOCK, filtered);
         }
     } catch (const std::exception& e) {
         std::cerr << "unit=4处理异常: " << e.what() << std::endl;
@@ -314,44 +271,34 @@ void VisionSystem::processDock(cv::Mat& resultImg) {
 }
 
 /**
- * @brief 处理二维码识别模式（MODE_QR）
- * 
- * @details 从扫码摄像头读取图像并识别二维码。
- *          如果扫码摄像头不可用，则使用主摄像头图像。
- * 
- * @param resultImg 结果图像（会被修改，绘制识别结果）
- * 
- * @note 识别流程：
- *       1. 尝试从扫码摄像头读取图像
- *       2. 如果扫码摄像头不可用，使用主摄像头图像
- *       3. 使用 QrDetector 识别二维码
- *       4. 如果识别成功，在图像上绘制二维码内容
- *       5. 发送二维码数据到串口
- *       
- * @see CameraManager::readQr(), QrDetector::detect(), SerialComm::sendQrData()
+ * @brief 二维码识别模式处理流程 MODE_QR
+ * @param result_img 主相机图像，用于画面渲染
+ * @details 双相机降级容错机制：
+ *  1. 优先读取专用扫码摄像头图像解码
+ *  2. 扫码相机异常/无设备时，降级使用主相机图像解码
+ *  3. 解码成功后打印日志、渲染文本、串口上报二维码字符串
  */
-void VisionSystem::processQr(cv::Mat& resultImg) {
+void VisionSystem::process_qr(cv::Mat& result_img) {
     try {
-        // 步骤 1: 从扫码摄像头读取图像
-        auto [success, qrImg] = camera.readQr();
-        
-        // 步骤 2: 选择目标图像（扫码摄像头 或 主摄像头）
-        cv::Mat targetImg = success ? qrImg : resultImg;
-        if (targetImg.empty()) return;  // 图像为空，退出
+        // 优先读取扫码摄像头
+        auto [success, qr_img] = camera.read_qr();
 
-        // 步骤 3: 识别二维码
-        auto qrData = qrDetector.detect(targetImg);
-        
-        if (qrData) {
-            // 识别成功，输出到控制台
-            std::cout << "二维码识别成功: " << *qrData << std::endl;
-            
-            // 在图像上绘制二维码内容（绿色）
-            cv::putText(resultImg, "QR: " + *qrData, cv::Point(10, 30),
+        // 双相机容错降级：扫码相机失败则使用主相机画面
+        cv::Mat target_img = success ? qr_img : result_img;
+        if (target_img.empty()) return;
+
+        // 二维码解码
+        auto qr_data = qr_detector.detect(target_img);
+
+        if (qr_data) {
+            std::cout << "二维码识别成功: " << *qr_data << std::endl;
+
+            // 在主画面左上角渲染二维码数据
+            cv::putText(result_img, "QR: " + *qr_data, cv::Point(10, 30),
                         cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
-            
-            // 发送二维码数据到串口
-            serialComm.sendQrData(*qrData);
+
+            // 串口上报二维码字符串
+            serial_comm.send_qr_data(*qr_data);
         }
     } catch (const std::exception& e) {
         std::cerr << "unit=9处理异常: " << e.what() << std::endl;
@@ -359,66 +306,57 @@ void VisionSystem::processQr(cv::Mat& resultImg) {
 }
 
 /**
- * @brief 处理单帧图像的核心入口
- * 
- * @details 根据工作模式调用相应的处理函数，并在图像上绘制模式文字。
- *          
- * @param img 输入图像（BGR格式）
- * @param unit 工作模式（默认-1，表示从串口读取）
- *        - MODE_COLOR (1): 三色物料检测
- *        - MODE_RING (3): 圆环检测
- *        - MODE_DOCK (4): 停靠点检测
- *        - MODE_QR (9): 二维码识别
- *        - MODE_IDLE (0): 空闲状态
- *        - < 0: 从串口读取当前工作模式
- * 
- * @return cv::Mat 处理后的图像（包含检测结果和模式文字）
- * 
- * @note 处理流程：
- *       1. 检查图像是否为空
- *       2. 如果未指定模式，从串口读取当前模式
- *       3. 根据模式调用相应的处理函数
- *       4. 在图像底部绘制模式文字
- *       5. 返回处理后的图像
- *       
- * @see processColor(), processRing(), processDock(), processQr()
+ * @brief 视觉系统单帧处理统一入口（顶层调度函数）
+ * @param img 原始相机BGR图像
+ * @param unit 手动指定工作模式，-1 自动从串口原子变量读取下位机下发模式
+ * @return cv::Mat 绘制完成、带模式标注的可视化结果图像
+ *
+ * 执行流程：
+ *  1. 空帧校验，无效图像直接返回
+ *  2. 自动/手动获取当前工作模式
+ *  3. 根据模式分支分发至对应处理函数
+ *  4. 画面底部渲染当前工作模式水印
+ *  5. 返回可视化图像供UI显示
+ *
+ * @note 线程安全：所有模式分支独立，异常隔离，单帧报错不阻塞后续帧
  */
-cv::Mat VisionSystem::processFrame(const cv::Mat& img, int unit) {
-    // 步骤 1: 检查图像是否为空
+cv::Mat VisionSystem::process_frame(const cv::Mat& img, int unit) 
+{
+    // 空图像防护
     if (img.empty()) return cv::Mat();
 
-    // 步骤 2: 如果未指定模式，从串口读取当前工作模式
-    if (unit < 0) {
-        unit = serialComm.unit.load();  // 从原子变量读取
+    // 自动模式：读取串口模块原子变量（下位机实时下发的工作指令）
+    if (unit < 0) 
+    {
+        unit = serial_comm.unit.load();
     }
 
-    // 克隆图像（避免修改原图）
-    cv::Mat resultImg = img.clone();
+    // 克隆原图，避免修改原始相机数据
+    cv::Mat result_img = img.clone();
 
-    // 步骤 3: 模式分发
+    // 多模式任务分发
     switch (unit) {
-        case MODE_COLOR: processColor(resultImg); break;  // 三色物料检测
-        case MODE_RING:  processRing(resultImg);  break;  // 圆环检测
-        case MODE_DOCK:  processDock(resultImg);  break;  // 停靠点检测
-        case MODE_QR:    processQr(resultImg);    break;  // 二维码识别
-        default: break;  // 其他模式（包括IDLE）不处理
-    }
-
-    // 步骤 4: 绘制模式文字（图像底部）
-    const char* modeText = "UNK";  // 未知模式
-    switch (unit) {
-        case MODE_IDLE:  modeText = "IDLE";  break;  // 空闲
-        case MODE_COLOR: modeText = "COLOR"; break;  // 三色物料
-        case MODE_RING:  modeText = "RING";  break;  // 圆环
-        case MODE_DOCK:  modeText = "DOCK";  break;  // 停靠点
-        case MODE_QR:    modeText = "QR";    break;  // 二维码
+        case MODE_COLOR: process_color(result_img); break;
+        case MODE_RING:  process_ring(result_img);  break;
+        case MODE_DOCK:  process_dock(result_img);  break;
+        case MODE_QR:    process_qr(result_img);    break;
         default: break;
     }
-    
-    // 在图像底部绘制模式文字（黄色）
-    cv::putText(resultImg, std::string("Mode: ") + modeText,
-                cv::Point(10, resultImg.rows - 10),
+
+    // 底部状态栏绘制当前工作模式
+    const char* mode_text = "UNK";
+    switch (unit) {
+        case MODE_IDLE:  mode_text = "IDLE";  break;
+        case MODE_COLOR: mode_text = "COLOR"; break;
+        case MODE_RING:  mode_text = "RING";  break;
+        case MODE_DOCK:  mode_text = "DOCK";  break;
+        case MODE_QR:    mode_text = "QR";    break;
+        default: break;
+    }
+
+    cv::putText(result_img, std::string("Mode: ") + mode_text,
+                cv::Point(10, result_img.rows - 10),
                 cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 255, 255), 2);
 
-    return resultImg;
+    return result_img;
 }

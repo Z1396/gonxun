@@ -1,59 +1,84 @@
 /**
- * 视觉系统控制器
- * 管理 VisionWorker 线程的启动、停止和资源回收
+ * @file vision_controller.hpp
+ * @brief 视觉系统控制器，管理 VisionWorker 线程的启停。
+ *
+ * 将 VisionSystem 的图像采集与处理循环移至独立 QThread，
+ * 通过 Qt 信号槽机制控制线程生命周期，实现视觉子系统的
+ * 异步运行与优雅退出。
  */
+
 #pragma once
 
-#include <QObject>
 #include <QThread>
 #include <atomic>
+#include <QObject>
 
 class VisionSystem;
 
 namespace gonxun {
 
 /**
- * 视觉工作线程
- * 在独立线程中运行视觉处理循环
+ * @brief 视觉工作线程对象，在独立 QThread 中执行图像采集处理循环。
+ *
+ * 循环调用 VisionSystem::camera.read_main() 读取主相机帧，
+ * 再调用 VisionSystem::process_frame() 进行处理，
+ * 当 running_ 标志或全局 g_running 为 false 时退出。
  */
 class VisionWorker : public QObject {
     Q_OBJECT
 public:
-    VisionWorker(VisionSystem* vs, std::atomic<bool>* running);
+    /**
+     * @brief 构造 VisionWorker。
+     * @param vs VisionSystem 实例指针
+     * @param running 运行标志原子变量指针
+     */
+    explicit VisionWorker(VisionSystem* vs, std::atomic<bool>* running);
 
 public slots:
+    /// 线程入口，执行视觉采集处理循环
     void run();
 
 signals:
+    /// 工作线程正常退出时发射
     void finished();
 
 private:
-    VisionSystem* m_visionSystem;
-    std::atomic<bool>* m_running;
+    VisionSystem* vision_system_;     ///< 视觉系统实例
+    std::atomic<bool>* running_;      ///< 运行标志（外部持有）
 };
 
 /**
- * 视觉系统控制器
- * 解耦 UI 和视觉线程，统一管理启停
+ * @brief 视觉系统控制器，负责创建和管理 VisionWorker 线程。
+ *
+ * 调用 start() 启动视觉线程，调用 stop() 请求退出并等待线程结束。
+ * 析构时自动停止线程。线程安全：running_ 为 atomic<bool>。
  */
 class VisionController : public QObject {
     Q_OBJECT
 public:
+    /**
+     * @brief 构造视觉控制器。
+     * @param vs VisionSystem 实例指针
+     */
     explicit VisionController(VisionSystem* vs);
-    ~VisionController();
+    /// 析构时自动停止视觉线程
+    ~VisionController() override;
 
 public slots:
+    /// 启动视觉采集处理线程
     void start();
+    /// 停止视觉线程并等待退出
     void stop();
 
 private slots:
-    void onFinished();
+    /// 工作线程完成时的清理回调
+    void on_finished();
 
 private:
-    VisionSystem* m_visionSystem;
-    VisionWorker* m_worker;
-    QThread* m_thread;
-    std::atomic<bool> m_running;
+    VisionSystem* vision_system_;     ///< 视觉系统实例
+    VisionWorker* worker_;            ///< 工作线程对象
+    QThread* thread_;                 ///< 承载 worker 的 QThread
+    std::atomic<bool> running_;       ///< 运行标志
 };
 
 } // namespace gonxun

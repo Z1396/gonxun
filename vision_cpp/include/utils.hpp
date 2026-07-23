@@ -1,39 +1,60 @@
 /**
- * 视觉系统工具模块
- * 对应 Python: vision/utils.py
- * - FPSCounter: 帧率计数器
- * - checkGuiAvailable: 检测 OpenCV 图形窗口支持
- * - generateTestFrame: 生成测试画布
+ * @file utils.hpp
+ * @brief 视觉系统工具：FPS计数、GUI检测、测试帧生成、平台检测
+ *
+ * 提供运行时辅助功能，不依赖具体检测算法。
+ * FPSCounter 用于性能监控；平台检测函数用于自适应配置。
  */
 #pragma once
 
-#include <opencv2/opencv.hpp>
 #include <chrono>
 #include <string>
+#include <opencv2/opencv.hpp>
 
-/** FPS 帧率计数器 */
+/**
+ * @brief FPS 计数器，按固定帧间隔更新统计值
+ */
 class FPSCounter {
 public:
-    explicit FPSCounter(int updateInterval = 10);
+    /**
+     * @brief 构造函数
+     * @param update_interval 每 N 帧更新一次 FPS，默认 10
+     */
+    explicit FPSCounter(int update_interval = 10);
 
-    /** 每帧调用，返回当前 FPS */
-    double tick();
+    /**
+     * @brief 每帧调用，帧数达到间隔时重新计算 FPS
+     * @return 当前 FPS 值
+     */
+    [[nodiscard]] double tick();
 
 private:
-    int m_updateInterval;
-    double m_fps;
-    int m_frameCount;
-    std::chrono::steady_clock::time_point m_startTime;
+    int update_interval_;                              ///< 更新间隔帧数
+    double fps_;                                       ///< 当前 FPS
+    int frame_count_;                                  ///< 累计帧数
+    std::chrono::steady_clock::time_point start_time_; ///< 计时起点
 };
 
-/** 检测当前环境是否支持 OpenCV 图形窗口 */
-bool checkGuiAvailable();
+/**
+ * @brief 检测 GUI 是否可用（能否创建 OpenCV 窗口）
+ * @return 可用返回 true
+ */
+[[nodiscard]] bool check_gui_available();
 
-/** 生成测试画布（相机读取失败时使用） */
-cv::Mat generateTestFrame();
+/**
+ * @brief 生成测试帧，包含三个彩色圆形（红/绿/蓝），用于无摄像头时调试
+ * @return 640×480 BGR 测试图像
+ */
+[[nodiscard]] cv::Mat generate_test_frame();
 
-/** 检测是否为 Jetson 平台 */
-bool isJetson();
+/**
+ * @brief 检测当前是否运行在 Jetson 平台
+ * @return 是 Jetson 返回 true（通过 /etc/nv_tegra_release 判断）
+ */
+[[nodiscard]] bool is_jetson();
 
-/** 检测是否为 headless 模式（无显示器） */
-bool isHeadless();
+/**
+ * @brief 检测当前是否为无头环境（无 DISPLAY 或 GUI 不可用）
+ * @return 无头返回 true
+ */
+[[nodiscard]] bool is_headless();

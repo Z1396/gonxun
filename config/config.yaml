@@ -34,6 +34,18 @@ serial:
   # 模拟模式下是否循环发送测试数据
   mock_cycle: true
 
+# ========== 运动控制配置 ==========
+motion:
+  # 步进电机默认参数
+  default_speed: 300      # 默认移动速度 (mm/s)
+  default_accel: 500      # 默认加速度 (mm/s²)
+  # 重传机制
+  max_retries: 3          # 超时重试次数
+  command_timeout: 500    # 指令超时时间 (ms)
+  # 机械参数
+  steps_per_grid: 480     # 每格步数脉冲数（根据机械参数计算）
+  grid_size_mm: 480       # 每格物理尺寸 (mm)
+
 # ========== 摄像头配置 ==========
 camera:
   # 主摄像头 (物料/色环识别)

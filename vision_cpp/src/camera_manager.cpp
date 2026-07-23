@@ -1,24 +1,22 @@
 /**
  * @file camera_manager.cpp
- * @brief 摄像头管理模块实现文件
- * 
- * @details 本文件实现了智能物流搬运系统的摄像头管理功能。
- *          核心功能：
- *          - 双摄像头管理：主摄像头（目标检测）、扫码摄像头（二维码识别）
- *          - 跨平台支持：Windows (DirectShow)、Linux (V4L2)、macOS (自动选择)
- *          - 自动重连机制：检测失败后自动尝试重新连接
- *          - 分辨率配置：支持分辨率降级、曝光参数调节
- *          - 线程安全设计：使用互斥锁保护摄像头资源
- * 
- * @author 智能物流搬运系统开发团队
- * @version 1.0
- * @date 2025-01-01
- * 
- * @note 修改历史：
- *       - 2025-01-01: 初始版本，实现基本摄像头管理功能
- *       - 2025-03-15: 增加自动重连机制和线程安全保护
- * 
- * @see camera_manager.hpp
+ * @brief 双摄像头管理器实现
+ *
+ * 【模块核心职责】
+ * 1. 统一管理主摄像头（物料/算法检测）、扫码摄像头（QR解码）双设备
+ * 2. 完成相机初始化、参数配置、实时帧读取、异常检测、自动重连全流程
+ * 3. 线程安全设计：双相机独立互斥锁，杜绝多线程抢设备崩溃
+ * 4. 故障熔断机制：连续读取失败30次，自动释放资源、触发重连，适配摄像头松动/掉线/卡顿
+ *
+ * 【运行平台&驱动】
+ * 目标平台: Ubuntu 18.04
+ * 驱动后端: V4L2 (Linux标准视频设备驱动)
+ *
+ * 【容错策略】
+ * - 单帧读取失败：累计错误计数
+ * - 连续失败≥30次：熔断释放相机句柄，清空计数
+ * - 设备断开后：自动延时重试连接，支持热插拔恢复
+ * - 分辨率自适应：硬件不支持目标分辨率自动降级兼容
  */
 #include "camera_manager.hpp"
 
@@ -27,290 +25,229 @@
 #include <thread>
 
 /**
- * @brief 降级分辨率列表
- * 
- * @details 当摄像头无法以目标分辨率打开时，依次尝试列表中的较低分辨率。
- *          分辨率从高到低排列，确保在性能受限时仍能正常工作。
- * 
- * @note 列表顺序：
- *       - 640x480: 标准分辨率，适合大多数应用场景
- *       - 320x240: 中等分辨率，降低计算负载
- *       - 160x120: 最低分辨率，用于极端性能受限场景
+ * @brief 相机分辨率降级适配序列（从高到低）
+ * @note 当用户配置的分辨率硬件不支持时，自动逐级降级，保证相机正常启动
+ * 适配老旧USB相机、嵌入式设备、带宽不足场景
+ * 降级优先级：640×480(默认) → 320×240 → 160×120
  */
 const std::vector<std::pair<int, int>> FALLBACK_RESOLUTIONS = {
-    {640, 480},  // 标准分辨率
-    {320, 240},  // 中等分辨率
-    {160, 120},  // 最低分辨率
+    {640, 480},
+    {320, 240},
+    {160, 120},
 };
 
 /**
- * @brief 获取当前平台的推荐摄像头后端
- * 
- * @details 根据操作系统自动选择最优的摄像头后端：
- *          - Windows: 使用 DirectShow (cv::CAP_DSHOW)，稳定性和兼容性最佳
- *          - Linux: 使用 V4L2 (cv::CAP_V4L2)，包括 Jetson Nano 等嵌入式平台
- *          - macOS/其他: 使用自动选择 (cv::CAP_ANY)
- * 
- * @return int OpenCV 摄像头后端标识符
- * 
- * @note 平台检测通过预处理器宏实现，编译时确定后端类型
- * @see cv::VideoCapture, cv::CAP_DSHOW, cv::CAP_V4L2
+ * @brief 获取当前平台首选相机驱动后端
+ * @return int OpenCV驱动枚举值
+ * @note Ubuntu18.04 固定使用 V4L2 后端，兼容性、稳定性远优于默认后端
  */
-int CameraManager::getPreferredBackend() {
-#ifdef _WIN32
-    return cv::CAP_DSHOW;   // Windows: DirectShow 更稳定
-#elif defined(__linux__)
-    return cv::CAP_V4L2;   // Linux: V4L2
-#else
-    return cv::CAP_ANY;    // macOS/其他: 自动选择
-#endif
+int CameraManager::get_preferred_backend() {
+    return cv::CAP_V4L2;
 }
 
 /**
- * @brief 构造函数，初始化摄像头管理器
- * 
- * @details 配置双摄像头参数，包括索引、分辨率、重连策略等。
- *          采用延迟初始化策略，构造时不立即打开摄像头。
- * 
- * @param main_index 主摄像头索引（用于目标检测），通常为 0 或 1
- * @param qr_index 扫码摄像头索引（用于二维码识别），通常为 1 或 2
- * @param main_width 主摄像头分辨率宽度（像素）
- * @param main_height 主摄像头分辨率高度（像素）
- * @param qr_width 扫码摄像头分辨率宽度（像素）
- * @param qr_height 扫码摄像头分辨率高度（像素）
- * @param max_reconnect 最大重连次数（保留参数，当前未使用）
- * @param reconnect_delay 重连延迟时间（秒），避免频繁重连
- * 
- * @note 默认失败阈值为 30 次，超过后触发重连
- * @see open(), close()
+ * @brief 相机管理器构造函数
+ * @param main_index 主相机设备索引 /dev/videoX
+ * @param qr_index 扫码相机设备索引 /dev/videoX
+ * @param main_width 主相机目标宽度
+ * @param main_height 主相机目标高度
+ * @param qr_width 扫码相机目标宽度
+ * @param qr_height 扫码相机目标高度
+ * @param max_reconnect 最大重连次数（预留扩展）
+ * @param reconnect_delay 重连间隔延时（秒）
+ *
+ * 初始化内容：
+ * 1. 保存双相机设备参数、分辨率、重连配置
+ * 2. 加载系统最优驱动后端
+ * 3. 初始化故障计数、熔断阈值
+ * 4. 双相机独立互斥锁默认就绪
  */
 CameraManager::CameraManager(int main_index, int qr_index,
                              int main_width, int main_height,
                              int qr_width, int qr_height,
                              int max_reconnect, double reconnect_delay)
-    : main_index_(main_index),             // 主摄像头索引
-      qr_index_(qr_index),                 // 扫码摄像头索引
-      main_resolution_(main_width, main_height),  // 主摄像头分辨率
-      qr_resolution_(qr_width, qr_height), // 扫码摄像头分辨率
-      max_reconnect_(max_reconnect),       // 最大重连次数
-      reconnect_delay_(reconnect_delay),   // 重连延迟时间（秒）
-      backend_(getPreferredBackend()),     // 平台推荐后端
-      main_fail_count_(0),                 // 主摄像头失败计数器
-      qr_fail_count_(0),                   // 扫码摄像头失败计数器
-      fail_threshold_(30) {}               // 失败阈值（30次）
+    : main_index_(main_index),
+      qr_index_(qr_index),
+      main_resolution_(main_width, main_height),
+      qr_resolution_(qr_width, qr_height),
+      max_reconnect_(max_reconnect),
+      reconnect_delay_(reconnect_delay),
+      backend_(get_preferred_backend()),
+      main_fail_count_(0),
+      qr_fail_count_(0),
+      fail_threshold_(30) {}
 
+/**
+ * @brief 析构函数
+ * @note 对象销毁时强制关闭并释放双相机资源
+ * 杜绝相机句柄泄露、设备占用、重启失效问题
+ */
 CameraManager::~CameraManager() {
     close();
 }
 
 /**
- * @brief 配置摄像头参数
- * 
- * @details 设置分辨率、缓冲区大小、曝光参数等。
- *          针对 Linux (Jetson) 和 Windows 平台采用不同的曝光配置策略。
- * 
- * @param cap 摄像头捕获对象的引用
- * @param resolution 目标分辨率 (宽度, 高度)
- * 
- * @note 曝光配置说明：
- *       - Linux/Jetson: 手动曝光模式，曝光值 120（正值），增益 15
- *       - Windows: 手动曝光模式，曝光值 -5（负值）
- *       - 目的：减少 50Hz 灯光频闪对图像质量的影响
- *       
- * @note 缓冲区大小设为 1，确保获取最新帧而非旧帧
+ * @brief 相机参数统一配置函数
+ * @param cap 已成功打开的相机捕获句柄
+ * @param resolution 目标配置分辨率
+ * @note 仅相机打开成功后执行，参数针对Ubuntu18.04+V4L2深度调优
+ *
+ * 核心调优参数：
+ * 1. 固定分辨率：匹配项目算法输入尺寸
+ * 2. 缓冲区大小=1：最小化帧缓存，大幅降低图像延迟
+ * 3. 手动曝光+固定增益：避免画面频闪、亮度跳变，保证检测稳定性
  */
-void CameraManager::configureCapture(cv::VideoCapture& cap,
-                                     const std::pair<int, int>& resolution) const {
-    // 检查摄像头是否已打开
+void CameraManager::configure_capture(cv::VideoCapture& cap,
+                                       const std::pair<int, int>& resolution) const {
+    // 防护：未打开的相机不执行配置
     if (!cap.isOpened()) {
         return;
     }
-    
-    // 设置分辨率
+
+    // 设置相机分辨率
     cap.set(cv::CAP_PROP_FRAME_WIDTH, static_cast<double>(resolution.first));
     cap.set(cv::CAP_PROP_FRAME_HEIGHT, static_cast<double>(resolution.second));
-    
-    // 设置缓冲区大小为 1，确保读取最新帧
+
+    // 缩小缓冲区至1帧，消除画面延迟、帧堆积问题
     cap.set(cv::CAP_PROP_BUFFERSIZE, 1.0);
-    
-#ifdef __linux__
-    // Jetson/Linux 曝光设置（减少50Hz灯光频闪）
-    cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 1.0);    // 手动曝光模式
-    cap.set(cv::CAP_PROP_EXPOSURE, 120.0);        // Jetson 用正值（单位：曝光时间单位）
-    cap.set(cv::CAP_PROP_GAIN, 15.0);             // 增益（提高低光环境下的亮度）
-#else
-    // Windows 曝光设置
-    cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 0.25);   // 手动曝光模式
-    cap.set(cv::CAP_PROP_EXPOSURE, -5.0);        // Windows 用负值（单位：对数曝光值）
-#endif
+
+    // 曝光模式配置：手动曝光，关闭自动曝光（防止画面抖动）
+    cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 1.0);
+    // 固定曝光值、增益值，适配赛场光照环境
+    cap.set(cv::CAP_PROP_EXPOSURE, 120.0);
+    cap.set(cv::CAP_PROP_GAIN, 15.0);
 }
 
 /**
- * @brief 打开单个摄像头
- * 
- * @details 尝试使用平台推荐后端和自动后端打开摄像头，
- *          如果成功则配置参数并验证实际分辨率。
- * 
- * @param index 摄像头索引（0, 1, 2...）
- * @param resolution 目标分辨率 (宽度, 高度)
- * @param name 摄像头名称（用于日志输出，如 "主"、"扫码"）
- * 
- * @return std::unique_ptr<cv::VideoCapture> 成功返回摄像头对象，失败返回 nullptr
- * 
- * @note 后端尝试顺序：
- *       1. 平台推荐后端（DirectShow/V4L2）
- *       2. 自动选择后端（CAP_ANY）
- *       
- * @note 分辨率降级：
- *       如果摄像头不支持目标分辨率，将使用实际支持的分辨率，
- *       并输出降级警告日志。
+ * @brief 通用单相机打开工具函数
+ * @param index 相机设备索引
+ * @param resolution 目标分辨率
+ * @param name 相机名称（用于日志区分主/扫码相机）
+ * @return std::unique_ptr<cv::VideoCapture> 相机句柄，失败返回空指针
+ *
+ * 打开策略：
+ * 1. 优先使用V4L2专用后端，适配Linux系统
+ * 2. V4L2打开失败则降级使用系统默认后端
+ * 3. 打开成功后执行参数配置
+ * 4. 校验实际分辨率，自动识别硬件降级并打印日志
  */
-std::unique_ptr<cv::VideoCapture> CameraManager::openOne(
+std::unique_ptr<cv::VideoCapture> CameraManager::open_one(
     int index, const std::pair<int, int>& resolution, const std::string& name) const {
-    
-    // 尝试不同后端：首选后端 + 自动后端
+
+    // 双后端适配：优先V4L2，失败使用默认后端
     const int backends[2] = {backend_, cv::CAP_ANY};
     std::unique_ptr<cv::VideoCapture> cap;
-    
-    // 按顺序尝试后端
+
+    // 遍历后端尝试打开设备
     for (int be : backends) {
         cap = std::make_unique<cv::VideoCapture>(index, be);
         if (cap->isOpened()) {
-            break;  // 成功打开，退出循环
+            break;
         }
-        cap.reset();  // 失败，重置指针
+        // 打开失败，释放句柄，尝试下一个后端
+        cap.reset();
     }
-    
-    // 检查是否成功打开
+
+    // 所有后端均打开失败，直接返回空
     if (!cap) {
         std::cout << "[摄像头] 警告：无法打开" << name << "摄像头 " << index << std::endl;
         return nullptr;
     }
-    
-    // 配置摄像头参数
-    configureCapture(*cap, resolution);
 
-    // 验证实际分辨率
+    // 配置相机参数（分辨率、延迟、曝光、增益）
+    configure_capture(*cap, resolution);
+
+    // 读取硬件实际生效分辨率
     int actual_w = static_cast<int>(cap->get(cv::CAP_PROP_FRAME_WIDTH));
     int actual_h = static_cast<int>(cap->get(cv::CAP_PROP_FRAME_HEIGHT));
-    
-    // 检查是否发生分辨率降级
+
+    // 检测是否发生分辨率降级，打印提示日志
     if (actual_w != resolution.first || actual_h != resolution.second) {
         std::cout << "[摄像头] " << name << "摄像头分辨率降级: 请求"
                   << resolution.first << "x" << resolution.second
                   << ", 实际" << actual_w << "x" << actual_h << std::endl;
     }
-    
-    // 输出成功日志
+
     std::cout << "[摄像头] " << name << "摄像头已打开: index=" << index
               << ", 分辨率=" << actual_w << "x" << actual_h << std::endl;
-    
+
     return cap;
 }
 
 /**
- * @brief 打开所有摄像头
- * 
- * @details 调用 openOne() 分别打开主摄像头和扫码摄像头。
- *          如果某个摄像头打开失败，不会影响另一个摄像头的使用。
- * 
- * @note 调用时机：
- *       - 程序启动时调用
- *       - 手动重新连接时调用
- *       
- * @see openOne(), close()
+ * @brief 批量打开双相机（主相机+扫码相机）
+ * @note 基于通用open_one接口，分别初始化两个设备
+ * 两个相机独立初始化，互不影响，单相机失败不阻塞另一个
  */
 void CameraManager::open() {
-    // 打开主摄像头（用于目标检测）
-    cap_ = openOne(main_index_, main_resolution_, "主");
-    // 打开扫码摄像头（用于二维码识别）
-    cap2_ = openOne(qr_index_, qr_resolution_, "扫码");
+    cap_ = open_one(main_index_, main_resolution_, "主");
+    cap2_ = open_one(qr_index_, qr_resolution_, "扫码");
 }
 
 /**
- * @brief 关闭所有摄像头
- * 
- * @details 线程安全地释放摄像头资源，重置失败计数器。
- *          使用互斥锁保护资源访问，避免多线程竞争。
- * 
- * @note 调用时机：
- *       - 程序退出时
- *       - 切换摄像头配置时
- *       - 发生不可恢复的错误时
- *       
- * @note 线程安全：
- *       使用两个独立的锁分别保护主摄像头和扫码摄像头，
- *       避免一个锁阻塞另一个摄像头的操作。
+ * @brief 关闭并释放所有相机资源
+ * @note 线程安全操作：独立互斥锁保护双相机设备
+ * 释放句柄、重置智能指针、清空故障计数，恢复初始状态
  */
 void CameraManager::close() {
-    // 关闭主摄像头
+    // 安全释放主相机
     {
         std::lock_guard<std::mutex> lock(main_lock_);
         if (cap_) {
-            cap_->release();  // 释放摄像头资源
+            cap_->release();
         }
-        cap_.reset();  // 重置智能指针
+        cap_.reset();
     }
-    
-    // 关闭扫码摄像头
+
+    // 安全释放扫码相机
     {
         std::lock_guard<std::mutex> lock(qr_lock_);
         if (cap2_) {
-            cap2_->release();  // 释放摄像头资源
+            cap2_->release();
         }
-        cap2_.reset();  // 重置智能指针
+        cap2_.reset();
     }
-    
-    // 重置失败计数器
+
+    // 清空故障计数，重置异常状态
     main_fail_count_ = 0;
     qr_fail_count_ = 0;
 }
 
 /**
- * @brief 重连摄像头
- * 
- * @details 当摄像头读取失败时，自动尝试重新连接。
- *          使用互斥锁保护重连过程，避免多线程竞争。
- *          持锁等待 reconnect_delay_ 秒后尝试重连。
- * 
- * @param index 摄像头索引
+ * @brief 相机自动重连通用函数
+ * @param index 相机设备索引
  * @param resolution 目标分辨率
- * @param name 摄像头名称（用于日志输出）
- * @param current_cap 当前摄像头对象的引用（智能指针）
- * @param lock 保护该摄像头的互斥锁
- * 
- * @note 线程安全设计：
- *       1. 使用互斥锁保护重连过程
- *       2. 双重检查：进入函数后再次检查 current_cap，避免重复重连
- *       3. 持锁等待：等待期间锁定互斥锁，避免其他线程同时读取
- *       
- * @note 重连延迟：
- *       reconnect_delay_ 秒的等待时间用于给硬件恢复时间，
- *       避免立即重连导致的问题。
+ * @param name 相机名称（日志标识）
+ * @param current_cap 相机句柄引用
+ * @param lock 对应相机的独立互斥锁
+ *
+ * 重连逻辑：
+ * 1. 加锁保证重连过程线程安全
+ * 2. 设备已正常打开则跳过重连
+ * 3. 延时等待后重新尝试打开设备
+ * 4. 打印重连成功/失败日志
  */
 void CameraManager::reconnect(int index,
                               const std::pair<int, int>& resolution,
                               const std::string& name,
                               std::unique_ptr<cv::VideoCapture>& current_cap,
                               std::mutex& lock) {
-    // 加锁保护重连过程
     std::lock_guard<std::mutex> lk(lock);
-    
-    // 双重检查：已由其他线程重连，直接返回
+
+    // 设备已就绪，无需重连
     if (current_cap) {
         return;
     }
-    
+
     std::cout << "[摄像头] 正在重连" << name << "摄像头 " << index << "..." << std::endl;
-    
-    // 持锁等待，避免重连期间其他线程同时读取（与 Python 行为一致）
+
+    // 延时重试，避免高频空转占用CPU
     std::this_thread::sleep_for(
         std::chrono::duration<double>(reconnect_delay_));
-    
-    // 尝试重新打开摄像头
-    current_cap = openOne(index, resolution, name);
-    
-    // 输出重连结果
+
+    // 重新打开相机设备
+    current_cap = open_one(index, resolution, name);
+
     if (current_cap) {
         std::cout << "[摄像头] " << name << "摄像头重连成功" << std::endl;
     } else {
@@ -319,118 +256,84 @@ void CameraManager::reconnect(int index,
 }
 
 /**
- * @brief 读取主摄像头帧
- * 
- * @details 从主摄像头读取一帧图像，失败时自动计数并触发重连机制。
- *          使用互斥锁保护摄像头资源，确保线程安全。
- * 
- * @return std::pair<bool, cv::Mat> 
- *         - first: 是否成功读取（true/false）
- *         - second: 图像帧（成功时有效，失败时为空）
- * 
- * @note 失败检测机制：
- *       1. 每次读取失败，失败计数器 +1
- *       2. 失败计数达到 fail_threshold_（默认 30 次）时，释放摄像头
- *       3. 释放后，下次调用会触发重连
- *       
- * @note 线程安全：
- *       - 使用互斥锁保护摄像头读取操作
- *       - 锁外检查摄像头状态，避免持锁时间过长
- *       - 重连函数内部会再次加锁
- *       
- * @see reconnect(), readQr()
+ * @brief 读取主相机图像帧（线程安全）
+ * @return std::pair<bool, cv::Mat> (读取是否成功, 图像帧)
+ *
+ * 核心容错逻辑：
+ * 1. 加锁保护，防止多线程同时读帧崩溃
+ * 2. 读取成功：清空故障计数，返回有效帧
+ * 3. 读取失败：累计故障计数
+ * 4. 连续失败≥30次：熔断释放设备句柄，触发下次自动重连
+ * 5. 设备断开状态：自动执行重连逻辑
  */
-std::pair<bool, cv::Mat> CameraManager::readMain() {
-    // 加锁保护读取操作
+std::pair<bool, cv::Mat> CameraManager::read_main() {
     {
         std::lock_guard<std::mutex> lock(main_lock_);
-        
-        // 检查摄像头是否可用
+
+        // 设备正常打开，尝试读取帧
         if (cap_ && cap_->isOpened()) {
             cv::Mat frame;
-            bool ret = cap_->read(frame);  // 读取一帧
-            
+            bool ret = cap_->read(frame);
+
+            // 读取成功，重置错误计数，返回帧数据
             if (ret) {
-                // 读取成功，重置失败计数器
                 main_fail_count_ = 0;
                 return {true, std::move(frame)};
             }
-            
-            // 读取失败，增加失败计数
+
+            // 读取失败，累计错误次数
             main_fail_count_++;
-            
-            // 失败次数超过阈值，释放摄像头资源
+
+            // 达到熔断阈值：释放设备资源，进入待重连状态
             if (main_fail_count_ >= fail_threshold_) {
-                main_fail_count_ = 0;  // 重置计数器
-                cap_->release();       // 释放摄像头
-                cap_.reset();          // 重置智能指针
+                main_fail_count_ = 0;
+                cap_->release();
+                cap_.reset();
             }
         }
     }
-    
-    // 锁外检查并尝试重连（避免持锁时间过长）
+
+    // 设备未就绪，尝试自动重连
     if (!cap_) {
         reconnect(main_index_, main_resolution_, "主", cap_, main_lock_);
     }
-    
-    return {false, cv::Mat()};  // 返回失败状态
+
+    return {false, cv::Mat()};
 }
 
 /**
- * @brief 读取扫码摄像头帧
- * 
- * @details 从扫码摄像头读取一帧图像，用于二维码识别。
- *          失败时自动计数并触发重连机制。
- *          使用独立的互斥锁保护扫码摄像头资源。
- * 
- * @return std::pair<bool, cv::Mat> 
- *         - first: 是否成功读取（true/false）
- *         - second: 图像帧（成功时有效，失败时为空）
- * 
- * @note 与 readMain() 的区别：
- *       - 使用独立的摄像头对象 (cap2_)
- *       - 使用独立的互斥锁 (qr_lock_)
- *       - 使用独立的失败计数器 (qr_fail_count_)
- *       
- * @note 失败检测机制：
- *       1. 每次读取失败，失败计数器 +1
- *       2. 失败计数达到 fail_threshold_（默认 30 次）时，释放摄像头
- *       3. 释放后，下次调用会触发重连
- *       
- * @see reconnect(), readMain()
+ * @brief 读取扫码相机图像帧（线程安全）
+ * @return std::pair<bool, cv::Mat> (读取是否成功, 图像帧)
+ * @note 逻辑与主相机完全一致，双相机独立容错、独立计数、独立重连
  */
-std::pair<bool, cv::Mat> CameraManager::readQr() {
-    // 加锁保护读取操作
+std::pair<bool, cv::Mat> CameraManager::read_qr() {
     {
         std::lock_guard<std::mutex> lock(qr_lock_);
-        
-        // 检查摄像头是否可用
+
         if (cap2_ && cap2_->isOpened()) {
             cv::Mat frame;
-            bool ret = cap2_->read(frame);  // 读取一帧
-            
+            bool ret = cap2_->read(frame);
+
             if (ret) {
-                // 读取成功，重置失败计数器
                 qr_fail_count_ = 0;
                 return {true, std::move(frame)};
             }
-            
-            // 读取失败，增加失败计数
+
             qr_fail_count_++;
-            
-            // 失败次数超过阈值，释放摄像头资源
+
+            // 达到阈值熔断释放
             if (qr_fail_count_ >= fail_threshold_) {
-                qr_fail_count_ = 0;  // 重置计数器
-                cap2_->release();    // 释放摄像头
-                cap2_.reset();       // 重置智能指针
+                qr_fail_count_ = 0;
+                cap2_->release();
+                cap2_.reset();
             }
         }
     }
-    
-    // 锁外检查并尝试重连（避免持锁时间过长）
+
+    // 自动重连扫码相机
     if (!cap2_) {
         reconnect(qr_index_, qr_resolution_, "扫码", cap2_, qr_lock_);
     }
-    
-    return {false, cv::Mat()};  // 返回失败状态
+
+    return {false, cv::Mat()};
 }

@@ -1,446 +1,394 @@
-/**
- * @file simulation_controller.cpp
- * @brief 仿真控制器实现文件
- * 
- * @details 本文件实现了任务仿真控制器，用于离线测试任务执行流程。
- *          核心功能：
- *          - 导航序列生成：自动生成从启停区到各区域的路径
- *          - 动画播放控制：基于定时器的帧动画，支持加速/减速
- *          - 状态机集成：与 TaskStateMachine 同步状态
- *          - 数据面板更新：实时显示机器人坐标、任务进度
- *          
- *          仿真流程：
- *          1. 用户点击“仿真”按钮，启动仿真
- *          2. 调用 buildNavSequence() 生成导航序列
- *          3. 使用定时器逐帧更新机器人位置
- *          4. 每到达一个目标点，触发状态机事件
- *          5. 循环执行直到完成所有轮次
- *          
- *          导航序列结构：
- *          - 每轮循环：启停区 → 扫码区 → 原料区 → 粗加工区 → 暂存区 → 启停区
- *          - 坐标基于实际地图尺寸（2400x2400 mm）
- *          - 使用 A* 算法生成路径（若启用路径规划）
- *          
- *          性能优化：
- *          - 使用 Qt::PreciseTimer 提高定时精度
- *          - 帧间隔可配置（默认 50ms，20fps）
- *          - 停留时间可配置（默认 800ms）
- *          
- * @see simulation_controller.h 头文件定义
- * @see courtmapwidget.h 场地地图控件
- * @see data_panel_widget.h 数据面板控件
- * @see task_state_machine.h 任务状态机
- * 
- * @author 工创赛2025智能物流搬运系统团队
- * @date 2024-01-15
- * @version 1.0.0
- * @history 2024-01-15 初始版本
- * @history 2024-02-20 新增状态机集成
- * 
- * @copyright 工创赛2025智能物流搬运系统
- */
-#include "simulation_controller.h"
+/// @file simulation_controller.cpp
+/// @brief 仿真控制器实现，包含5×5格子BFS路径搜索、动画播放与状态机推进。
+///        每段导航使用BFS在格子图上搜索避开障碍物的最短路径，
+///        找到后将路径转为赛场坐标序列驱动动画，同时通过串口下发步进指令。
+
+#include "simulation_controller.hpp"
+
 #include <QDateTime>
+#include <QQueue>
 #include <cmath>
 #include <iostream>
 
-/**
- * @brief SimulationController 构造函数
- * 
- * @details 初始化仿真控制器，完成以下工作：
- *          1. 创建动画定时器（高精度）
- *          2. 绑定状态机回调函数
- *          3. 初始化内部状态变量
- *          
- * @param mapWidget 场地地图控件指针
- * @param dataPanel 数据面板控件指针
- * @param parent 父对象（默认 nullptr）
- */
-SimulationController::SimulationController(CourtMapWidget* mapWidget,
-                                           DataPanelWidget* dataPanel,
-                                           QObject* parent)
+/// @brief 构造仿真控制器：初始化高精度动画定时器，绑定状态机回调
+///        以自动更新数据面板的状态与进度显示。
+SimulationController::SimulationController(CourtMapWidget& map_widget,
+                                           DataPanelWidget* data_panel,
+                                           MotionController* motion_controller,
+                                           QObject* parent) noexcept
     : QObject(parent)
-    , m_mapWidget(mapWidget)
-    , m_dataPanel(dataPanel)
+    , map_widget_(map_widget)
+    , data_panel_(data_panel)
+    , motion_controller_(motion_controller)
 {
-    // ==================== 动画定时器初始化 ====================
-    m_animTimer = new QTimer(this);
-    m_animTimer->setTimerType(Qt::PreciseTimer);  // 高精度定时器
-    connect(m_animTimer, &QTimer::timeout, this, &SimulationController::onAnimationTick);
+    // ==== 动画定时器初始化 ====
+    anim_timer_ = new QTimer(this);
+    anim_timer_->setTimerType(Qt::PreciseTimer);
+    connect(anim_timer_, &QTimer::timeout, this, &SimulationController::on_animation_tick);
 
-    // ==================== 状态机回调绑定 ====================
-    // 状态变更回调：更新数据面板的状态显示
-    m_stateMachine.onStateChange([this](gonxun::TaskState oldState, gonxun::TaskState newState) {
-        Q_UNUSED(oldState)
-        if (m_dataPanel) {
-            m_dataPanel->updateTaskState(
-                QString::fromStdString(gonxun::TaskStateMachine::stateToString(newState)));
+    // ==== 状态机回调绑定：状态变更时更新面板 ====
+    state_machine_.on_state_change([this](gonxun::TaskState old_state, gonxun::TaskState new_state) {
+        Q_UNUSED(old_state)
+        if (data_panel_) {
+            data_panel_->update_task_state(
+                QString::fromStdString(gonxun::TaskStateMachine::state_to_string(new_state)));
         }
     });
 
-    // 进度更新回调：更新数据面板的进度显示
-    m_stateMachine.onProgressUpdate([this](const gonxun::TaskProgress& p) {
-        if (m_dataPanel) {
-            m_dataPanel->updateTaskProgress(p.currentCycle, p.totalCycles,
-                                           p.materialsPicked, p.materialsPlaced,
-                                           p.totalMaterials);
-            m_dataPanel->updateTaskCode(QString::fromStdString(p.taskCode));
+    // 状态机回调绑定：进度更新时刷新面板
+    state_machine_.on_progress_update([this](const gonxun::TaskProgress& p) {
+        if (data_panel_) {
+            data_panel_->update_task_progress(p.current_cycle, p.total_cycles,
+                                              p.materials_picked, p.materials_placed,
+                                              p.total_materials);
+            data_panel_->update_task_code(QString::fromStdString(p.task_code));
         }
     });
 }
 
-/**
- * @brief 启动仿真
- * 
- * @details 执行完整的仿真流程：
- *          1. 检查启停区是否已选择
- *          2. 检查机器人是否可见
- *          3. 更新障碍物列表
- *          4. 生成导航序列
- *          5. 初始化状态机
- *          6. 开始动画播放
- *          
- * @param taskCode 任务码字符串（如 "123"）
- * @return true：启动成功；false：启动失败（未选择启停区或机器人不可见）
- */
-bool SimulationController::start(const QString& taskCode)
+/// @brief 启动仿真：检查前置条件，初始化导航序列与状态机，开始第一段。
+/// @param task_code 任务编码字符串
+/// @return true 启动成功；false 已在运行/未选择启停区/机器人不可见
+bool SimulationController::start(const QString& task_code)
 {
-    // 防止重复启动
-    if (m_running) {
+    if (running_) {
         return false;
     }
 
-    // 检查启停区是否已选择
-    if (m_mapWidget->selectedStartZone() < 0) {
-        m_phase = SimPhase::ERROR;
-        emit phaseChanged(m_phase, "错误：未选择启停区");
+    // 前置条件：必须选择启停区
+    if (map_widget_.selected_start_zone() < 0) {
+        phase_ = SimPhase::ERROR;
+        emit phase_changed(phase_, "错误：未选择启停区");
         return false;
     }
 
-    // 检查机器人是否可见
-    if (!m_mapWidget->isRobotVisible()) {
+    // 前置条件：机器人必须可见（有初始位置）
+    if (!map_widget_.is_robot_visible()) {
         return false;
     }
 
-    // ==================== 初始化仿真状态 ====================
-    m_taskCode = taskCode;
-    m_running = true;
-    m_currentSegment = 0;
-    m_currentCycle = 0;
-    m_totalDistance = 0.0;
-    m_totalSteps = 0;
-    m_totalTimer.start();
+    // ==== 初始化仿真状态 ====
+    task_code_ = task_code;
+    running_ = true;
+    current_segment_ = 0;
+    current_cycle_ = 0;
+    total_distance_ = 0.0;
+    total_steps_ = 0;
+    total_timer_.start();
 
-    // 更新障碍物列表（从地图控件同步）
-    updateObstaclesFromMap();
-    
-    // 生成导航序列
-    m_navSequence = buildNavSequence();
+    nav_sequence_ = build_nav_sequence();
 
-    // ==================== 初始化状态机 ====================
-    m_stateMachine.setTaskCode(taskCode.toStdString());
-    m_stateMachine.setTotalCycles(m_totalCycles);
-    m_stateMachine.setTotalMaterials(3);
-    m_stateMachine.reset();
-    m_stateMachine.handleEvent(gonxun::TaskEvent::START_MARKING);
-    m_stateMachine.handleEvent(gonxun::TaskEvent::MARKING_DONE);
-    m_stateMachine.handleEvent(gonxun::TaskEvent::START_MISSION);
+    // ==== 初始化状态机：快速推进到Mission状态 ====
+    state_machine_.set_task_code(task_code.toStdString());
+    state_machine_.set_total_cycles(total_cycles_);
+    state_machine_.set_total_materials(3);
+    state_machine_.reset();
+    (void)state_machine_.handle_event(gonxun::TaskEvent::START_MARKING);
+    (void)state_machine_.handle_event(gonxun::TaskEvent::MARKING_DONE);
+    (void)state_machine_.handle_event(gonxun::TaskEvent::START_MISSION);
 
-    // 更新数据面板
-    if (m_dataPanel) {
-        m_dataPanel->updateTaskCode(taskCode);
-        m_dataPanel->updateTaskState("仿真开始");
+    if (data_panel_) {
+        data_panel_->update_task_code(task_code);
+        data_panel_->update_task_state("仿真开始");
     }
 
-    // 发送仿真启动信号
-    emit simulationStarted();
-    
-    // 开始执行第一个导航段
-    startNextSegment();
+    emit simulation_started();
+
+    start_next_segment();
     return true;
 }
 
-void SimulationController::stop()
+/// @brief 停止仿真：重置所有运行状态，停止动画定时器，发射失败完成信号。
+void SimulationController::stop() noexcept
 {
-    m_running = false;
-    m_animTimer->stop();
-    m_phase = SimPhase::IDLE;
-    m_currentSegment = 0;
-    m_currentPathIdx = 0;
-    emit simulationFinished(false);
+    running_ = false;
+    anim_timer_->stop();
+    phase_ = SimPhase::IDLE;
+    current_segment_ = 0;
+    current_path_idx_ = 0;
+    emit simulation_finished(false);
 }
 
-QVector<SimulationController::NavTarget> SimulationController::buildNavSequence() const
+/// @brief 构建导航序列：每循环包含扫码区→原料区→粗加工区→暂存区，
+///        末尾添加返回启停区。启停区位置由用户选择决定。
+/// @return 完整导航目标列表
+QVector<SimulationController::NavTarget> SimulationController::build_nav_sequence() const
 {
     QVector<NavTarget> seq;
 
-    // 起点位置（已选启停区中心）
-    QPointF startPos = m_mapWidget->robotPos();
-
-    // 导航序列：起停区 → 扫码区 → 原料区 → 粗加工区 → 暂存区 → 起停区
-    // 循环时重复：扫码区 → 原料区 → 粗加工区 → 暂存区
-    // 坐标基于实际地图：二维码区(2360,1200) 原料区(1200,50) 粗加工区(1050/1200/1350,2325) 暂存区(75,1200)
-    for (int cycle = 0; cycle < m_totalCycles; ++cycle) {
-        // 前往二维码区（右侧）
-        seq.append({"前往扫码区", {2360, 1200}, "前往扫码区"});
-
-        // 前往原料区（使用格子中心坐标，避免靠近边界）
-        // 格子(2, 0)中心：(1200, 275)
-        seq.append({"前往原料区", {1200, 275}, "前往原料区"});
-
-        // 粗加工区有3个槽位，根据任务码决定顺序
-        auto order = [this]() -> QVector<int> {
-            if (m_taskCode.length() >= 3) {
-                return {m_taskCode[0].digitValue(), m_taskCode[1].digitValue(), m_taskCode[2].digitValue()};
-            }
-            return {1, 2, 3};
-        }();
-
-        for (int i = 0; i < 3; ++i) {
-            int slot = order[i] - 1;
-            // 粗加工区3个槽位：x=1050, 1200, 1350, y=2325
-            seq.append({QString("送物料%1到粗加工%2").arg(i+1).arg(slot+1),
-                       {1050 + slot * 150, 2325}, "前往粗加工区"});
-            // 每次放完需要回原料区取下一个
-            if (i < 2) {
-                seq.append({"前往原料区", {1200, 275}, "前往原料区"});
-            }
-        }
-
-        // 前往暂存区（左侧）
-        seq.append({"前往暂存区", {75, 1200}, "前往暂存区"});
+    for (int cycle = 0; cycle < total_cycles_; ++cycle) {
+        seq.append({"前往扫码区", 0, 2});
+        seq.append({"前往原料区", 2, 0});
+        seq.append({"前往粗加工区", 2, 4});
+        seq.append({"前往暂存区", 4, 2});
     }
 
-    // 最后返回起停区
-    seq.append({"返回启停区", {static_cast<int>(startPos.x()), static_cast<int>(startPos.y())}, "返回启停区"});
+    int start_x = 0;
+    int start_y = (map_widget_.selected_start_zone() == 0) ? 0 : 4;
+    seq.append({"返回启停区", start_x, start_y});
 
     return seq;
 }
 
-void SimulationController::startNextSegment()
+/// @brief 启动下一段导航：检查是否全部完成，否则设阶段PLANNING并规划路径。
+void SimulationController::start_next_segment()
 {
-    if (m_currentSegment >= m_navSequence.size()) {
-        onAllComplete();
+    if (current_segment_ >= nav_sequence_.size()) {
+        on_all_complete();
         return;
     }
 
-    const NavTarget& target = m_navSequence[m_currentSegment];
+    const NavTarget& target = nav_sequence_[current_segment_];
 
-    m_phase = SimPhase::PLANNING;
-    emit phaseChanged(m_phase, target.name);
+    phase_ = SimPhase::PLANNING;
+    emit phase_changed(phase_, target.name);
 
-    if (m_dataPanel) {
-        m_dataPanel->updateTaskState(target.name);
+    if (data_panel_) {
+        data_panel_->update_task_state(target.name);
     }
 
-    planCurrentSegment();
+    plan_current_segment();
 }
 
-void SimulationController::planCurrentSegment()
+/// @brief 为当前段执行BFS路径规划。
+///        在5×5格子图上从当前位置搜索到目标位置的最短路径，
+///        避开已标记障碍物和固定障碍物（黄色方块和启停区）。
+///        路径找到后转为赛场坐标并下发给运动控制器，然后启动动画。
+///        若路径被阻断则报错停止。
+void SimulationController::plan_current_segment()
 {
-    const NavTarget& target = m_navSequence[m_currentSegment];
+    const NavTarget& target = nav_sequence_[current_segment_];
+    QPointF current_pos = map_widget_.robot_pos();
 
-    QPointF currentPos = m_mapWidget->robotPos();
+    // 赛场坐标 → 5×5格子坐标
+    auto current_cell = map_widget_.field_to_grid5(static_cast<int>(current_pos.x()),
+                                                      static_cast<int>(current_pos.y()));
 
-    // ========== 改用格子批量路径（方案1）==========
-    // 核心原则：
-    // 1. 不使用A*精确路径（避免微调）
-    // 2. 使用格子批量路径（只有起点、转向点、终点）
-    // 3. 机器人只需进入格子区域，不需要精确到达中心
+    int current_grid_x = current_cell.grid_x;
+    int current_grid_y = current_cell.grid_y;
+    int target_grid_x = target.grid_x;
+    int target_grid_y = target.grid_y;
 
-    m_segmentTimer.start();
-
-    // 步骤1：将毫米坐标转换为格子坐标（使用GUI的真实格子定义）
-    auto currentCell = m_mapWidget->fieldToGrid5(static_cast<int>(currentPos.x()),
-                                                   static_cast<int>(currentPos.y()));
-    auto targetCell = m_mapWidget->fieldToGrid5(target.pos.x, target.pos.y);
-
-    int currentGridX = currentCell.gridX;
-    int currentGridY = currentCell.gridY;
-    int targetGridX = targetCell.gridX;
-    int targetGridY = targetCell.gridY;
-
-    // 检查是否已经在目标格子内
-    if (currentGridX == targetGridX && currentGridY == targetGridY) {
-        // 已经在目标格子内，直接标记为完成
-        onSegmentComplete();
+    // 起点与终点重合，直接完成当前段
+    if (current_grid_x == target_grid_x && current_grid_y == target_grid_y) {
+        on_segment_complete();
         return;
     }
 
-    // 步骤2：生成格子批量路径（只有起点、转向点、终点）
-    int currentAngle = 0;  // TODO: 从机器人状态获取实际朝向
-    QVector<QPointF> gridPath = m_mapWidget->generateBatchMovePath(
-        currentGridX, currentGridY,
-        targetGridX, targetGridY,
-        currentAngle
-    );
+    // ==== 5×5格子BFS路径搜索 ====
+    const int GRID_SIZE = 5;
+    bool visited[GRID_SIZE][GRID_SIZE] = {};
+    int parent_x[GRID_SIZE][GRID_SIZE] = {};
+    int parent_y[GRID_SIZE][GRID_SIZE] = {};
+    for (int y = 0; y < GRID_SIZE; ++y)
+        for (int x = 0; x < GRID_SIZE; ++x) {
+            parent_x[y][x] = -1;
+            parent_y[y][x] = -1;
+        }
 
-    // 步骤3：将格子路径转换为gonxun::Path格式
-    m_currentPath.clear();
-    for (const QPointF& pt : gridPath) {
-        m_currentPath.push_back({static_cast<int>(pt.x()), static_cast<int>(pt.y())});
+    // 四连通方向：右、左、下、上
+    const int dx[] = {1, -1, 0, 0};
+    const int dy[] = {0, 0, 1, -1};
+
+    // 返回启停区时允许进入启停区格子
+    bool is_return_to_start = target.name.contains("启停区");
+    // 获取选中的启停区Y坐标（0=右上角，4=右下角）
+    int selected_start_y = (map_widget_.selected_start_zone() == 0) ? 0 : 4;
+
+    // 可进入判定：边界内 + 无障碍
+    // 规则：离开启停区后不能进入任何启停区；返回时只能进入选中的启停区
+    auto can_enter = [&](int gx, int gy) -> bool {
+        if (gx < 0 || gx >= GRID_SIZE || gy < 0 || gy >= GRID_SIZE) return false;
+
+        // 启停区格子 (x=0, y=0 或 y=4)
+        bool is_start_zone_cell = (gx == 0 && (gy == 0 || gy == 4));
+
+        if (is_start_zone_cell) {
+            // 返回启停区时，只允许进入选中的启停区
+            if (is_return_to_start && gx == 0 && gy == selected_start_y) {
+                return true;
+            }
+            // 其他情况禁止进入启停区
+            return false;
+        }
+
+        // 非启停区格子：检查障碍物
+        if (map_widget_.has_obstacle_in_cell(gx, gy)) return false;
+        return true;
+    };
+
+    // BFS搜索
+    QQueue<QPair<int, int>> queue;
+    queue.enqueue({current_grid_x, current_grid_y});
+    visited[current_grid_y][current_grid_x] = true;
+
+    bool found = false;
+    while (!queue.isEmpty()) {
+        auto [cx, cy] = queue.dequeue();
+        if (cx == target_grid_x && cy == target_grid_y) {
+            found = true;
+            break;
+        }
+        for (int d = 0; d < 4; ++d) {
+            int nx = cx + dx[d];
+            int ny = cy + dy[d];
+            if (can_enter(nx, ny) && !visited[ny][nx]) {
+                visited[ny][nx] = true;
+                parent_x[ny][nx] = cx;
+                parent_y[ny][nx] = cy;
+                queue.enqueue({nx, ny});
+            }
+        }
     }
 
-    if (m_currentPath.empty()) {
-        // ========== 格子路径受阻，回退到A*算法绕行 ==========
-        emitLog(QString("[调试] 格子路径受阻，尝试A*绕行: (%1,%2) → (%3,%4)")
-                .arg(currentGridX).arg(currentGridY)
-                .arg(targetGridX).arg(targetGridY));
-
-        // 步骤A：将障碍物传递给A*规划器
-        updateObstaclesFromMap();
-
-        // 步骤B：判断是否允许经过启停区
-        // 只有在最后返回启停区时才允许
-        bool allowStartZone = target.name.contains("启停区");
-
-        // 步骤C：使用A*算法规划绕行路径
-        gonxun::Point astarStart{static_cast<int>(currentPos.x()), static_cast<int>(currentPos.y())};
-        gonxun::Point astarGoal{target.pos.x, target.pos.y};
-
-        m_currentPath = m_planner.plan(astarStart, astarGoal, allowStartZone);
-
-        if (!m_currentPath.empty()) {
-            emitLog(QString("[调试] A*绕行成功，路径点数: %1").arg(m_currentPath.size()));
-        } else {
-            emitLog(QString("[调试] A*绕行失败，路径被完全阻断"));
-        }
-
-        if (m_currentPath.empty()) {
-            // A*也找不到路径，真的无路可走
-            m_phase = SimPhase::ERROR;
-            m_stateMachine.handleEvent(gonxun::TaskEvent::ERROR_OCCURRED);
-            emit phaseChanged(m_phase, QString("无法到达: %1（路径被完全阻断）").arg(target.name));
-            stop();
-            return;
-        }
-
-        // 步骤D：将A*路径转换为GUI显示格式
-        gridPath.clear();
-        for (const auto& pt : m_currentPath) {
-            gridPath.append(QPointF(pt.x, pt.y));
-        }
+    // 路径不可达时报错停止
+    if (!found) {
+        phase_ = SimPhase::ERROR;
+        (void)state_machine_.handle_event(gonxun::TaskEvent::ERROR_OCCURRED);
+        emit phase_changed(phase_, QString("无法到达: %1（路径被阻断）").arg(target.name));
+        stop();
+        return;
     }
 
-    // 步骤4：设置路径可视化（GUI显示）
-    m_mapWidget->setPath(gridPath);
+    // 回溯重建格子路径序列
+    QVector<QPair<int, int>> grid_seq;
+    int px = target_grid_x, py = target_grid_y;
+    while (px != -1 && py != -1) {
+        grid_seq.prepend({px, py});
+        int ox = parent_x[py][px];
+        int oy = parent_y[py][px];
+        px = ox;
+        py = oy;
+    }
 
-    startMoving();
+    // 格子坐标 → 赛场坐标路径
+    QVector<QPointF> grid_path;
+    for (const auto& [gx, gy] : grid_seq) {
+        grid_path.append(map_widget_.get_cell_center(gx, gy));
+    }
+
+    // 在地图上显示路径
+    map_widget_.set_path(grid_path);
+
+    // 保存当前路径供动画使用
+    current_path_.clear();
+    for (const QPointF& pt : grid_path) {
+        current_path_.push_back({static_cast<int>(pt.x()), static_cast<int>(pt.y())});
+    }
+
+    // ==== 通过串口发送步进移动指令 ====
+    if (motion_controller_) {
+        motion_controller_->execute_grid_path(grid_seq, 0);
+    }
+
+    start_moving();
 }
 
-void SimulationController::startMoving()
+/// @brief 切换至MOVING阶段，重置动画索引并启动定时器。
+void SimulationController::start_moving()
 {
-    m_phase = SimPhase::MOVING;
-    m_currentPathIdx = 0;
-    emit phaseChanged(m_phase, "移动中");
-    m_animTimer->start(m_animInterval);
+    phase_ = SimPhase::MOVING;
+    current_path_idx_ = 0;
+    emit phase_changed(phase_, "移动中");
+    anim_timer_->start(anim_interval_);
 }
 
-void SimulationController::startDwelling()
+/// @brief 切换至DWELLING阶段：停止动画，延迟dwell_time_后推进到下一段。
+void SimulationController::start_dwelling()
 {
-    m_phase = SimPhase::DWELLING;
-    m_animTimer->stop();
-    emit phaseChanged(m_phase, "到达目标");
+    phase_ = SimPhase::DWELLING;
+    anim_timer_->stop();
+    emit phase_changed(phase_, "到达目标");
 
-    const NavTarget& target = m_navSequence[m_currentSegment];
-    if (m_dataPanel) {
-        m_dataPanel->updateTaskState("到达" + target.name);
+    const NavTarget& target = nav_sequence_[current_segment_];
+    if (data_panel_) {
+        data_panel_->update_task_state("到达" + target.name);
     }
 
-    QTimer::singleShot(m_dwellTime, this, [this]() {
-        onSegmentComplete();
+    // 驻留延迟后自动推进
+    QTimer::singleShot(dwell_time_, this, [this]() {
+        on_segment_complete();
     });
 }
 
-void SimulationController::onAnimationTick()
+/// @brief 动画定时器回调：将机器人沿当前路径前进一步，
+///        计算移动方向角度并更新地图与数据面板。路径走完转入驻留。
+void SimulationController::on_animation_tick()
 {
-    if (m_currentPathIdx >= static_cast<int>(m_currentPath.size())) {
-        startDwelling();
+    // 路径已走完，进入驻留
+    if (current_path_idx_ >= static_cast<int>(current_path_.size())) {
+        start_dwelling();
         return;
     }
 
-    const auto& pt = m_currentPath[m_currentPathIdx];
+    const auto& pt = current_path_[current_path_idx_];
 
-    QPointF currentPos = m_mapWidget->robotPos();
-    double dx = pt.x - currentPos.x();
-    double dy = pt.y - currentPos.y();
+    // 计算移动方向角度
+    QPointF cur_pos = map_widget_.robot_pos();
+    double dx = pt.x - cur_pos.x();
+    double dy = pt.y - cur_pos.y();
     double angle = std::atan2(dy, dx) * 180.0 / M_PI;
     if (angle < 0) angle += 360.0;
 
-    m_totalDistance += std::sqrt(dx*dx + dy*dy);
-    m_totalSteps++;
+    // 累计统计
+    total_distance_ += std::sqrt(dx*dx + dy*dy);
+    total_steps_++;
 
-    m_mapWidget->setRobotPos(QPointF(pt.x, pt.y), angle);
+    // 更新地图与面板
+    map_widget_.set_robot_pos(QPointF(pt.x, pt.y), angle);
 
-    if (m_dataPanel) {
-        m_dataPanel->updateRobotPose(pt.x, pt.y, angle);
+    if (data_panel_) {
+        data_panel_->update_robot_pose(pt.x, pt.y, angle);
     }
 
-    m_currentPathIdx++;
+    current_path_idx_++;
 }
 
-void SimulationController::onSegmentComplete()
+/// @brief 当前导航段完成处理：根据目标名称推进状态机事件，
+///        清除地图路径显示，递增段索引，启动下一段或完成全部。
+void SimulationController::on_segment_complete()
 {
-    const NavTarget& target = m_navSequence[m_currentSegment];
+    const NavTarget& target = nav_sequence_[current_segment_];
 
+    // 根据目标区域推进状态机（返回值为转移后状态，此处不使用）
     if (target.name.contains("扫码区")) {
-        m_stateMachine.handleEvent(gonxun::TaskEvent::REACHED_QR);
-        m_stateMachine.handleEvent(gonxun::TaskEvent::QR_SCANNED);
+        (void)state_machine_.handle_event(gonxun::TaskEvent::REACHED_QR);
+        (void)state_machine_.handle_event(gonxun::TaskEvent::QR_SCANNED);
     } else if (target.name.contains("原料区")) {
-        m_stateMachine.handleEvent(gonxun::TaskEvent::REACHED_MATERIAL);
-        m_stateMachine.handleEvent(gonxun::TaskEvent::MATERIAL_PICKED);
+        (void)state_machine_.handle_event(gonxun::TaskEvent::REACHED_MATERIAL);
+        (void)state_machine_.handle_event(gonxun::TaskEvent::MATERIAL_PICKED);
     } else if (target.name.contains("粗加工")) {
-        m_stateMachine.handleEvent(gonxun::TaskEvent::REACHED_PROCESS);
-        m_stateMachine.handleEvent(gonxun::TaskEvent::MATERIAL_PLACED);
+        (void)state_machine_.handle_event(gonxun::TaskEvent::REACHED_PROCESS);
+        (void)state_machine_.handle_event(gonxun::TaskEvent::MATERIAL_PLACED);
     } else if (target.name.contains("暂存区")) {
-        m_stateMachine.handleEvent(gonxun::TaskEvent::REACHED_BUFFER);
+        (void)state_machine_.handle_event(gonxun::TaskEvent::REACHED_BUFFER);
     } else if (target.name.contains("启停区")) {
-        m_stateMachine.handleEvent(gonxun::TaskEvent::REACHED_START);
-        m_stateMachine.handleEvent(gonxun::TaskEvent::ALL_DONE);
+        (void)state_machine_.handle_event(gonxun::TaskEvent::REACHED_START);
+        (void)state_machine_.handle_event(gonxun::TaskEvent::ALL_DONE);
     }
 
-    m_mapWidget->clearPath();
-    m_currentSegment++;
+    map_widget_.clear_path();
+    current_segment_++;
 
-    if (m_currentSegment >= m_navSequence.size()) {
-        onAllComplete();
+    if (current_segment_ >= nav_sequence_.size()) {
+        on_all_complete();
         return;
     }
 
-    startNextSegment();
+    start_next_segment();
 }
 
-void SimulationController::onAllComplete()
+/// @brief 全部导航段完成：停止仿真，设阶段COMPLETED，发射成功完成信号。
+void SimulationController::on_all_complete()
 {
-    m_running = false;
-    m_phase = SimPhase::COMPLETED;
-    m_animTimer->stop();
+    running_ = false;
+    phase_ = SimPhase::COMPLETED;
+    anim_timer_->stop();
 
-    if (m_dataPanel) {
-        m_dataPanel->updateTaskState("任务完成");
+    if (data_panel_) {
+        data_panel_->update_task_state("任务完成");
     }
 
-    emit phaseChanged(m_phase, "全部完成");
-    emit simulationFinished(true);
-}
-
-void SimulationController::updateObstaclesFromMap()
-{
-    auto markedObs = m_mapWidget->getMarkedObstacles();
-    std::vector<gonxun::ObstacleRect> obstacles;
-    for (const auto& obs : markedObs) {
-        obstacles.push_back({
-            static_cast<int>(obs.rect.x()),
-            static_cast<int>(obs.rect.y()),
-            static_cast<int>(obs.rect.width()),
-            static_cast<int>(obs.rect.height())
-        });
-    }
-    m_planner.setObstacles(obstacles);
-}
-
-void SimulationController::emitLog(const QString& msg)
-{
-    std::cout << msg.toStdString() << std::endl;
-    emit logMessage(msg);
+    emit phase_changed(phase_, "全部完成");
+    emit simulation_finished(true);
 }

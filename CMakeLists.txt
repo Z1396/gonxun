@@ -1,19 +1,6 @@
-# ============================================================
-# 工创赛2025智能物流搬运系统 - 统一构建配置
-# ============================================================
-#
-# 作用：整个项目的【编译打包总配置文件】
-# 你的项目分为三大模块：
-# 1. Core   底层核心通用库（内存、配置、工具）
-# 2. Vision 视觉算法库（OpenCV、YOLO、二维码、颜色识别）
-# 3. GUI    Qt可视化地图界面（你之前写的赛场地图窗口）
-#
-# 跨平台支持：
-# - Jetson Nano 嵌入式板子（比赛真实运行环境）
-# - PC Windows/Linux（调试环境）
-#
-# 编译流程：mkdir build && cd build && cmake .. && make -j4
-# ============================================================
+# ==== 工创赛智能物流搬运系统 - 统一构建配置 ====
+# 模块：Core(核心库) + Vision(视觉算法) + GUI(Qt可视化)
+# 编译：mkdir build && cd build && cmake .. && make -j4
 
 # 指定最低 CMake 版本
 cmake_minimum_required(VERSION 3.16)
@@ -161,11 +148,7 @@ add_library(gonxun_core SHARED
     core/src/vision_controller.cpp
     core/src/astar_planner.cpp
     core/src/task_state_machine.cpp
-    core/src/robot_controller.cpp
-    core/src/task_simulator.cpp
-    core/src/grid_planner.cpp
     core/src/grid5_path_planner.cpp
-    core/src/shared_memory.cpp
     config/src/config_loader.cpp
     # 头文件（用于 AUTOMOC）
     core/include/vision_controller.hpp
@@ -273,16 +256,18 @@ if(QT_AVAILABLE)
         gui/src/courtmapwidget.cpp
         gui/src/data_panel_widget.cpp
         gui/src/simulation_controller.cpp
+        gui/src/motion_controller.cpp
+        gui/src/touchhandler.cpp
     )
 
-    # 扫描所有GUI头文件（自动过滤不存在的文件）
+    # GUI头文件（统一 .hpp 扩展名）
     set(GUI_HEADERS
-        gui/include/mainwindow.h
         gui/include/mainwindow.hpp
-        gui/include/courtmapwidget.h
         gui/include/courtmapwidget.hpp
-        gui/include/data_panel_widget.h
-        gui/include/simulation_controller.h
+        gui/include/data_panel_widget.hpp
+        gui/include/simulation_controller.hpp
+        gui/include/motion_controller.hpp
+        gui/include/touchhandler.hpp
     )
     set(EXISTING_GUI_HEADERS "")
     foreach(H ${GUI_HEADERS})

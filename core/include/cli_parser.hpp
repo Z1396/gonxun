@@ -1,7 +1,9 @@
-/**
- * 命令行参数解析器
- * 封装 QCommandLineParser，简化参数处理
- */
+/// @file cli_parser.hpp
+/// @brief 命令行参数解析器，封装 QCommandLineParser。
+///
+/// 提供统一的命令行选项定义与解析，输出 CliOptions 结构体，
+/// 支持模拟串口、配置文件路径、串口设备等选项。
+
 #pragma once
 
 #include <string>
@@ -11,50 +13,36 @@ class QCommandLineParser;
 
 namespace gonxun {
 
-/**
- * 命令行参数结果
- */
+/// @brief 命令行解析结果，包含所有可选参数。
 struct CliOptions {
-    bool mockSerial{false};       // 是否模拟串口
-    bool headless{false};         // 是否无头模式
-    bool simulate{false};         // 是否仿真模式
-    std::string configPath;       // 配置文件路径
-    std::string serialPort;       // 串口设备路径
-    std::string taskCode;         // 任务码（仿真用）
+    bool mock_serial{false};     ///< 是否模拟串口通信（调试用）
+    std::string config_path;     ///< 配置文件路径（YAML）
+    std::string serial_port;     ///< 串口设备路径（如 /dev/ttyCH341USB0）
 };
 
-/**
- * 命令行解析器
- * 解析启动参数并返回结果
- */
+/// @brief 命令行参数解析器，基于 QCommandLineParser。
+///
+/// 支持选项：--mock-serial, --config <file>, --serial-port <port>。
 class CliParser {
 public:
-    /**
-     * 构造函数
-     * @param app Qt 应用实例
-     * @param defaultConfig 默认配置文件路径
-     * @param defaultSerialPort 默认串口路径
-     */
+    /// @brief 构造解析器。
+    /// @param app QApplication 引用
+    /// @param default_config 默认配置文件路径
+    /// @param default_serial_port 默认串口设备路径
     CliParser(QApplication& app,
-              const std::string& defaultConfig = "config/config.yaml",
-              const std::string& defaultSerialPort = "/dev/ttyCH341USB0");
-
-    /**
-     * 析构函数
-     */
+              const std::string& default_config = "config/config.yaml",
+              const std::string& default_serial_port = "/dev/ttyCH341USB0");
     ~CliParser();
 
-    /**
-     * 解析命令行参数
-     * @return 解析结果
-     */
-    CliOptions parse();
+    /// @brief 解析命令行参数。
+    /// @return 解析结果结构体
+    [[nodiscard]] CliOptions parse();
 
 private:
-    QApplication& m_app;
-    QCommandLineParser* m_parser;
-    std::string m_defaultConfig;
-    std::string m_defaultSerialPort;
+    QApplication& app_;                     ///< QApplication 引用
+    QCommandLineParser* parser_;             ///< Qt 命令行解析器
+    std::string default_config_;             ///< 默认配置文件路径
+    std::string default_serial_port_;        ///< 默认串口设备路径
 };
 
 } // namespace gonxun
