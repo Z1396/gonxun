@@ -70,7 +70,7 @@ QString button_style(const char *normal, const char *hover, const char *checked)
  *  7. 所有信号槽绑定（UI ↔ 业务逻辑 ↔ 仿真逻辑）
  *  8. 初始化全局状态栏状态
  */
-MainWindow::MainWindow(SerialComm& serial_comm, VisionSystem& vision_system,
+MainWindow::MainWindow(gonxun::SerialComm& serial_comm, VisionSystem& vision_system,
                          QWidget* parent) noexcept
     : QMainWindow(parent),
       serial_comm_(&serial_comm),

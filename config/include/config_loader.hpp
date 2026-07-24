@@ -8,6 +8,8 @@
  */
 #pragma once
 
+#include "common_types.hpp"
+
 #include <memory>
 #include <string>
 
@@ -119,30 +121,27 @@ struct Config {
  * @brief 配置加载器单例，从 YAML 文件加载 Config。
  *
  * 使用 Meyer's Singleton 保证全局唯一实例。
- * 当 yaml-cpp 库不可用时，load() 返回 false，使用默认配置。
+ * 当 yaml-cpp 库不可用时，load() 返回错误，使用默认配置。
  */
 class ConfigLoader {
 public:
+    /**
+     * @brief 初始化配置加载器（单例）。
+     * @param path YAML 配置文件路径
+     * @return 成功返回 void，失败返回错误信息
+     */
+    [[nodiscard]] static ExpectedVoid init(const std::string& path) noexcept;
+
     /**
      * @brief 获取单例实例。
      * @return ConfigLoader 的全局唯一引用
      */
     [[nodiscard]] static ConfigLoader& instance();
 
-    /**
-     * @brief 从 YAML 文件加载配置。
-     * @param path YAML 配置文件路径
-     * @return true 加载成功，false 加载失败（使用默认配置）
-     */
-    [[nodiscard]] bool load(const std::string& path);
-
     /// 获取当前配置的常量引用
     [[nodiscard]] const Config& config() const { return config_; }
     /// 获取当前配置的可修改引用（用于命令行参数覆盖）
     [[nodiscard]] Config& config() { return config_; }
-
-    /// 判断配置是否已成功加载
-    [[nodiscard]] bool is_loaded() const { return loaded_; }
 
 private:
     ConfigLoader() = default;
@@ -170,7 +169,6 @@ private:
     void parse_system(const YAML::Node& node);
 
     Config config_;          ///< 当前配置
-    bool loaded_{false};     ///< 是否已成功加载
 };
 
 } // namespace gonxun

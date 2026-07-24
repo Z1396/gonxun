@@ -1,6 +1,6 @@
 /**
  * @file logger.hpp
- * @brief 通用日志系统，单例模式，线程安全。
+ * @brief 通用日志系统，RAII 生命周期管理。
  *
  * 程序启动时自动清空旧日志，每次运行只保留当前会话的日志记录。
  * 支持多日志级别：INFO、WARN、ERROR。
@@ -8,6 +8,8 @@
  */
 
 #pragma once
+
+#include "common_types.hpp"
 
 #include <cstdio>
 #include <iostream>
@@ -25,10 +27,10 @@ enum class LogLevel {
     ERROR   ///< 错误信息
 };
 
-// ==== 日志系统（单例） ====
+// ==== 日志系统（单例 + RAII） ====
 
 /**
- * @brief 通用日志系统，单例模式，线程安全。
+ * @brief 通用日志系统，单例模式，RAII 生命周期管理，线程安全。
  *
  * 特性：
  * - 程序启动时自动清空旧日志文件
@@ -36,43 +38,40 @@ enum class LogLevel {
  * - 线程安全（内部互斥锁保护）
  * - 自动添加时间戳和日志级别
  * - 自动捕获所有 stdout/stderr 输出到日志文件
+ * - 使用 FileOwner 管理 FILE*，符合 Talos 规范
  */
 class Logger {
 public:
-    /// 获取单例实例
-    [[nodiscard]] static Logger& instance() noexcept;
-
     /**
-     * @brief 初始化日志系统。
+     * @brief 初始化日志系统（单例）。
+     * @param log_path 日志文件路径，默认 logs/gonxun.log
+     * @return 成功返回 void，失败返回错误信息
      *
      * - 清空旧日志文件
      * - 写入启动信息
      * - 重定向 stdout/stderr 到日志文件（同时保留终端输出）
-     *
-     * @param log_path 日志文件路径，默认 logs/gonxun.log
      */
-    void init(const std::string& log_path = "logs/gonxun.log");
+    [[nodiscard]] static ExpectedVoid init(const std::string& log_path = "logs/gonxun.log") noexcept;
+
+    /// 获取单例实例
+    [[nodiscard]] static Logger& instance() noexcept;
+
+    Logger(const Logger&) = delete;
+    Logger& operator=(const Logger&) = delete;
+
+    /// 析构时自动关闭文件
+    ~Logger() noexcept;
 
     /// 写入日志（同时输出到终端和文件）
     void log(LogLevel level, const char* format, ...) noexcept;
 
-    /// 关闭日志文件，恢复 stdout/stderr
-    void close() noexcept;
-
-    /// 析构时自动关闭文件
-    ~Logger();
-
 private:
     Logger() = default;
-    Logger(const Logger&) = delete;
-    Logger& operator=(const Logger&) = delete;
 
-    std::FILE* file_ = nullptr;     ///< 日志文件指针
-    std::mutex mutex_;               ///< 线程安全互斥锁
-    bool initialized_ = false;       ///< 是否已初始化
-
-    int original_stdout_fd_ = -1;    ///< 原始 stdout 文件描述符
-    int original_stderr_fd_ = -1;    ///< 原始 stderr 文件描述符
+    FileOwner file_;                     ///< 日志文件 RAII 持有者
+    std::mutex mutex_;                   ///< 线程安全互斥锁
+    int original_stdout_fd_{-1};         ///< 原始 stdout 文件描述符
+    int original_stderr_fd_{-1};         ///< 原始 stderr 文件描述符
 };
 
 // ==== 便捷宏定义 ===//

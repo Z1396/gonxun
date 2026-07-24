@@ -7,7 +7,7 @@
 #include <QMetaObject>
 
 /// @brief 构造运动控制器：注册串口回调，初始化看门狗定时器。
-MotionController::MotionController(SerialComm& serial_comm,
+MotionController::MotionController(gonxun::SerialComm& serial_comm,
                                      CourtMapWidget& map_widget,
                                      QObject* parent) noexcept
     : QObject(parent),

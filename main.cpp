@@ -16,27 +16,17 @@
 ///  VisionController --调度--> VisionSystem(视觉算法业务)
 ///  VisionSystem --依赖--> ConfigLoader(全局配置)
 
-#include "mainwindow.hpp"        // UI主窗口
-#include "vision_system.hpp"     // 视觉算法总系统
-#include "config_loader.hpp"     // YAML配置加载器
-#include "app_signals.hpp"       // 系统信号优雅退出
-#include "vision_controller.hpp" // 视觉线程控制器
-#include "logger.hpp"            // 通用日志系统
+#include "mainwindow.hpp"
+#include "vision_system.hpp"
+#include "config_loader.hpp"
+#include "app_signals.hpp"
+#include "vision_controller.hpp"
+#include "logger.hpp"
 
-#include <opencv2/core.hpp>      // CommandLineParser
-
+#include <opencv2/core.hpp>
 #include <QApplication>
 #include <iostream>
 
-/**
- * @brief 程序唯一入口函数
- * @param argc 参数个数
- * @param argv 参数数组
- * @return int 程序退出码
- * @note 所有模块生命周期全部由 main 统一管理
- */
-// 命令行参数定义：sp_vision_25 风格
-// 格式：{参数名 | 默认值 | 说明}，@ 表示位置参数（无需参数名，直接传值）
 const std::string cli_keys =
   "{help h usage ? |      | 显示命令行参数说明}"
   "{@config-path   | config/config.yaml | YAML 配置文件路径}"
@@ -51,22 +41,26 @@ int main(int argc, char* argv[])
         cli.printMessage();
         return 0;
     }
-    auto config_path = cli.get<std::string>(0);  // 位置参数：配置文件路径
+    auto config_path = cli.get<std::string>(0);
 
     // ===================== 2. 注册全局系统信号处理器 =====================
     gonxun::setup_signal_handlers();
 
     // ===================== 2.5 初始化日志系统 =====================
-    gonxun::Logger::instance().init("logs/gonxun.log");
+    auto log_exp = gonxun::Logger::init("logs/gonxun.log");
+    if (gonxun::is_error(log_exp)) {
+        std::cerr << "[Main] 日志初始化失败: " << gonxun::get_error(log_exp) << std::endl;
+        return 1;
+    }
     LOG_INFO("程序启动中... 配置文件: {}", config_path.c_str());
 
     // ===================== 3. 加载全局YAML配置 =====================
-    auto& config_loader = gonxun::ConfigLoader::instance();
-    if (!config_loader.load(config_path)) {
-        std::cerr << "[Main] 配置加载失败: " << config_path << std::endl;
+    auto config_exp = gonxun::ConfigLoader::init(config_path);
+    if (gonxun::is_error(config_exp)) {
+        std::cerr << "[Main] 配置加载失败: " << gonxun::get_error(config_exp) << std::endl;
         return 1;
     }
-    auto& cfg = config_loader.config();
+    auto& cfg = gonxun::ConfigLoader::instance().config();
 
     // 命令行参数覆盖 YAML 配置
     if (cli.has("mock-serial"))  cfg.serial.mock = true;
@@ -82,8 +76,13 @@ int main(int argc, char* argv[])
     std::cout << "[Main] 串口设备: " << cfg.serial.port
               << " (模拟串口=" << (cfg.serial.mock ? "开启" : "关闭") << ")" << std::endl;
 
-    // 串口实例由 main 统一管理，注入 VisionSystem 与 MainWindow 共享，避免双实例争抢 fd
-    SerialComm serial_comm(cfg.serial.mock, cfg.serial.port, cfg.serial.baudrate);
+    auto serial_exp = gonxun::SerialComm::create(cfg.serial.mock, cfg.serial.port, cfg.serial.baudrate);
+    if (gonxun::is_error(serial_exp)) {
+        std::cerr << "[Main] 串口初始化失败: " << gonxun::get_error(serial_exp) << std::endl;
+        return 1;
+    }
+    auto serial_comm_ptr = std::move(gonxun::get_value(serial_exp));
+    gonxun::SerialComm& serial_comm = *serial_comm_ptr;
 
     // ===================== 6. 视觉系统 + GUI 主窗口（注入 serial_comm） =====================
     VisionSystem vision_system(cfg, serial_comm);
@@ -106,13 +105,11 @@ int main(int argc, char* argv[])
     QObject::connect(&window, &MainWindow::vision_stop_requested,
                      &controller, &gonxun::VisionController::stop);
 
-    // 摄像头图像信号
     QObject::connect(&controller, &gonxun::VisionController::frame_ready,
                      &window, &MainWindow::on_frame_ready);
     QObject::connect(&controller, &gonxun::VisionController::qr_frame_ready,
                      &window, &MainWindow::on_qr_frame_ready);
 
-    // 模式切换信号
     QObject::connect(&window, &MainWindow::mode_switch_requested,
         [&vision_system](int mode, bool manual) {
             vision_system.manual_mode_.store(manual, std::memory_order_relaxed);
@@ -130,7 +127,6 @@ int main(int argc, char* argv[])
     gonxun::request_exit();
 
     LOG_INFO("系统安全退出");
-    gonxun::Logger::instance().close();
 
     return ret;
 }

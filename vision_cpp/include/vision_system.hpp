@@ -87,7 +87,7 @@ public:
      * @param cfg 系统配置（串口、摄像头、YOLO 等参数均从中读取）
      * @param serial_comm 外部传入的串口通信实例（由 main 统一管理，与 MainWindow 共享）
      */
-    explicit VisionSystem(const gonxun::Config& cfg, SerialComm& serial_comm);
+    explicit VisionSystem(const gonxun::Config& cfg, gonxun::SerialComm& serial_comm);
     ~VisionSystem() = default;
 
     /**
@@ -110,7 +110,7 @@ public:
      */
     void set_current_batch(int batch);
 
-    SerialComm& serial_comm;          ///< 串口通信实例（外部注入，与 MainWindow 共享）
+    gonxun::SerialComm& serial_comm;          ///< 串口通信实例（外部注入，与 MainWindow 共享）
     CameraManager camera;             ///< 双摄像头管理器
     QRDetector qr_detector;           ///< QR 码检测器
     TaskCodeParser task_parser;        ///< 任务码解析器

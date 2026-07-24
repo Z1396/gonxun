@@ -28,7 +28,7 @@ public:
     /// @param serial_comm 串口通信实例（必须存在）
     /// @param map_widget 地图控件（保留扩展用）
     /// @param parent 父对象
-    explicit MotionController(SerialComm& serial_comm,
+    explicit MotionController(gonxun::SerialComm& serial_comm,
                                CourtMapWidget& map_widget,
                                QObject* parent = nullptr) noexcept;
     ~MotionController() override = default;
@@ -112,7 +112,7 @@ private:
     /// @brief 停止看门狗定时器。
     void stop_watchdog();
 
-    SerialComm& serial_comm_;             ///< 串口通信实例
+    gonxun::SerialComm& serial_comm_;             ///< 串口通信实例
     CourtMapWidget& map_widget_;          ///< 地图控件（保留扩展）
 
     QQueue<gonxun::MoveSegment> segment_queue_;  ///< 待发送段队列

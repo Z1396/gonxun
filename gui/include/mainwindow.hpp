@@ -27,7 +27,7 @@ public:
     /// @param serial_comm 外部注入的串口实例（与 VisionSystem 共享）
     /// @param vision_system 外部注入的视觉系统（用于取物料坐标、设置视觉模式）
     /// @param parent 父控件
-    explicit MainWindow(SerialComm& serial_comm, VisionSystem& vision_system,
+    explicit MainWindow(gonxun::SerialComm& serial_comm, VisionSystem& vision_system,
                          QWidget* parent = nullptr) noexcept;
     ~MainWindow() override;
 
@@ -72,7 +72,7 @@ private:
 
     CourtMapWidget *court_map_ = nullptr;
     SimulationController *sim_controller_ = nullptr;
-    SerialComm *serial_comm_ = nullptr;          ///< 外部注入，不拥有
+    gonxun::SerialComm *serial_comm_ = nullptr;          ///< 外部注入，不拥有
     MotionController *motion_controller_ = nullptr;
     VisionSystem *vision_system_ = nullptr;      ///< 外部注入，不拥有
 

@@ -32,7 +32,7 @@
  * @note 串口通信实例由外部（main）统一构造并注入，避免双实例争抢串口
  * @note 启动自检，提示YOLO模型加载状态，提前暴露初始化异常
  */
-VisionSystem::VisionSystem(const gonxun::Config& cfg, SerialComm& serial_comm)
+VisionSystem::VisionSystem(const gonxun::Config& cfg, gonxun::SerialComm& serial_comm)
     : serial_comm(serial_comm),
       camera(
           cfg.camera.main.index,           // 主相机设备索引

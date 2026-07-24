@@ -12,6 +12,7 @@
 #pragma once
 
 #include "motion_protocol.hpp"
+#include "common_types.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -21,13 +22,37 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <variant>
 #include <vector>
 
-/// @brief 串口通信类，支持真实串口和模拟模式。
-///
-/// 接收线程持续解析 6 字节 FeedbackFrame；解析成功后通过
-/// 注册的回调通知上层（match_start 仅触发一次，move_done/grab_done 每次边沿触发）。
-/// 模拟模式下根据发送的指令按预设延迟自动产生对应 done 信号。
+namespace gonxun {
+
+// ==== 串口状态（std::variant 表达互斥状态） ====
+
+/// 真实串口状态
+struct RealSerial {
+    FileDescriptor fd;  ///< 文件描述符 RAII 持有者
+    std::string port;   ///< 串口设备路径
+    int baudrate;       ///< 波特率
+};
+
+/// 模拟串口状态
+struct MockSerial {
+    std::string port;   ///< 模拟设备路径（用于显示）
+    int baudrate;       ///< 模拟波特率
+};
+
+/// 串口运行时状态
+using SerialState = std::variant<std::monostate, RealSerial, MockSerial>;
+
+// ==== 串口通信类 ====
+
+/**
+ * @brief 串口通信类，支持真实串口和模拟模式。
+ *
+ * 使用 std::variant 表达真实串口和模拟串口的互斥状态，
+ * 避免多个 bool 标志拼状态机，符合 Talos 规范。
+ */
 class SerialComm {
 public:
     /// @brief 比赛开始回调签名（参数为 true 表示收到 match_start=1）
@@ -37,26 +62,43 @@ public:
     /// @brief 抓取完成回调签名
     using GrabDoneCallback = std::function<void()>;
 
-    /// @brief 构造串口通信对象
+    /// @brief 创建串口通信实例（模拟模式）
+    /// @param port 模拟设备路径（用于显示）
+    /// @param baudrate 模拟波特率
+    /// @return 成功返回 SerialComm 指针，失败返回错误信息
+    [[nodiscard]] static Expected<std::unique_ptr<SerialComm>> create_mock(
+        const std::string& port = "/dev/ttyCH341USB0",
+        int baudrate = 115200) noexcept;
+
+    /// @brief 创建串口通信实例（真实串口）
+    /// @param port 串口设备路径
+    /// @param baudrate 波特率
+    /// @return 成功返回 SerialComm 指针，失败返回错误信息
+    [[nodiscard]] static Expected<std::unique_ptr<SerialComm>> create_real(
+        const std::string& port = "/dev/ttyCH341USB0",
+        int baudrate = 115200) noexcept;
+
+    /// @brief 创建串口通信实例（自动选择模式）
     /// @param mock 是否使用模拟模式
     /// @param port 串口设备路径
     /// @param baudrate 波特率
-    explicit SerialComm(bool mock = true,
-                        const std::string& port = "/dev/ttyCH341USB0",
-                        int baudrate = 115200) noexcept;
-    ~SerialComm();
+    /// @return 成功返回 SerialComm 指针，失败返回错误信息
+    /// @note 真实串口打开失败时自动回退模拟模式
+    [[nodiscard]] static Expected<std::unique_ptr<SerialComm>> create(
+        bool mock = true,
+        const std::string& port = "/dev/ttyCH341USB0",
+        int baudrate = 115200) noexcept;
 
+    SerialComm(SerialComm&&) noexcept = default;
+    SerialComm& operator=(SerialComm&&) noexcept = default;
     SerialComm(const SerialComm&) = delete;
     SerialComm& operator=(const SerialComm&) = delete;
 
-    /// @brief 打开真实串口设备
-    /// @return 打开成功返回 true
-    [[nodiscard]] bool open();
+    ~SerialComm();
 
-    /// @brief 关闭串口并停止接收线程
-    void close();
+    explicit SerialComm(SerialState state) noexcept : state_(std::move(state)) {}
 
-    /// @brief 启动串口通信（含接收线程）。真实串口打开失败时回退模拟模式。
+    /// @brief 启动串口通信（含接收线程）。
     void start();
 
     // ==== 发送接口 ====
@@ -94,6 +136,11 @@ public:
         grab_done_cb_ = std::move(cb);
     }
 
+    /// @brief 判断当前是否为模拟模式
+    [[nodiscard]] bool is_mock() const noexcept {
+        return std::holds_alternative<MockSerial>(state_);
+    }
+
 private:
     /// @brief 真实串口接收循环：6 字节帧同步解析
     void process_real();
@@ -105,30 +152,25 @@ private:
     /// @param frame 完整帧字节数组
     void transmit(const std::vector<uint8_t>& frame);
     /// @brief 解析接收缓冲区中的完整帧并派发事件
-    void dispatch_feedback(const gonxun::FeedbackFrame& fb) noexcept;
-    /// @brief 模拟模式下记录发送事件，触发后续 done 信号生成
-    void record_mock_send(uint8_t mode, uint8_t grab) noexcept;
+    void dispatch_feedback(const FeedbackFrame& fb) noexcept;
 
-    bool mock_;                       ///< 是否模拟模式
-    std::string port_;                ///< 串口设备路径
-    int baudrate_;                    ///< 波特率
+    SerialState state_;                     ///< 串口状态（variant 表达互斥）
 
-    int fd_;                          ///< 串口文件描述符，-1 表示未打开
-    std::deque<uint8_t> rx_buf_;      ///< 接收缓冲区
-    std::mutex rx_mutex_;             ///< 接收缓冲区互斥锁
+    std::deque<uint8_t> rx_buf_;            ///< 接收缓冲区
+    std::mutex rx_mutex_;                   ///< 接收缓冲区互斥锁
 
-    std::thread thread_;              ///< 接收线程
-    std::atomic<bool> running_;       ///< 线程运行标志
-    std::mutex tx_mutex_;             ///< 发送互斥锁
+    std::thread thread_;                    ///< 接收线程
+    std::atomic<bool> running_{false};      ///< 线程运行标志
+    std::mutex tx_mutex_;                   ///< 发送互斥锁
 
     // 比赛开始锁存标志
-    bool match_started_ = false;      ///< 是否已收到 match_start（仅触发一次）
+    bool match_started_ = false;            ///< 是否已收到 match_start（仅触发一次）
 
     // 三个事件回调
     MatchStartCallback match_start_cb_;
     MoveDoneCallback move_done_cb_;
     GrabDoneCallback grab_done_cb_;
-    std::mutex cb_mutex_;             ///< 回调互斥锁
+    std::mutex cb_mutex_;                   ///< 回调互斥锁
 
     // 模拟模式状态
     std::atomic<bool> mock_match_sent_{false};     ///< 是否已发过 match_start
@@ -137,3 +179,5 @@ private:
     std::atomic<bool> mock_move_pending_{false};   ///< 是否有待触发的 move_done
     std::atomic<bool> mock_grab_pending_{false};   ///< 是否有待触发的 grab_done
 };
+
+} // namespace gonxun
